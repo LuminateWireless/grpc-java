@@ -33,7 +33,7 @@ package io.grpc.testing.integration;
 
 import com.google.common.util.concurrent.MoreExecutors;
 
-import io.grpc.ServerImpl;
+import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NettyServerBuilder;
@@ -74,13 +74,14 @@ public class TestServiceServer {
     });
     server.start();
     System.out.println("Server started on port " + server.port);
+    server.blockUntilShutdown();
   }
 
   private int port = 8080;
   private boolean useTls = true;
 
   private ScheduledExecutorService executor;
-  private ServerImpl server;
+  private Server server;
 
   private void parseArgs(String[] args) {
     boolean usage = false;
@@ -151,5 +152,15 @@ public class TestServiceServer {
       System.err.println("Timed out waiting for server shutdown");
     }
     MoreExecutors.shutdownAndAwaitTermination(executor, 5, TimeUnit.SECONDS);
+  }
+
+
+  /**
+   * Await termination on the main thread since the grpc library uses daemon threads.
+   */
+  private void blockUntilShutdown() throws InterruptedException {
+    if (server != null) {
+      server.awaitTermination();
+    }
   }
 }

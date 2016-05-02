@@ -31,6 +31,7 @@
 
 package io.grpc.testing;
 
+import io.grpc.ExperimentalApi;
 import io.grpc.ForwardingServerCall.SimpleForwardingServerCall;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
@@ -70,6 +71,7 @@ import javax.security.auth.x500.X500Principal;
 /**
  * Common utility functions useful for writing tests.
  */
+@ExperimentalApi
 public class TestUtils {
   public static final String TEST_SERVER_HOST = "foo.test.google.fr";
 
@@ -84,25 +86,14 @@ public class TestUtils {
       public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
           MethodDescriptor<ReqT, RespT> method,
           ServerCall<RespT> call,
-          final Metadata.Headers requestHeaders,
+          final Metadata requestHeaders,
           ServerCallHandler<ReqT, RespT> next) {
         return next.startCall(method,
             new SimpleForwardingServerCall<RespT>(call) {
-              boolean sentHeaders;
-
               @Override
-              public void sendHeaders(Metadata.Headers responseHeaders) {
+              public void sendHeaders(Metadata responseHeaders) {
                 responseHeaders.merge(requestHeaders, keySet);
                 super.sendHeaders(responseHeaders);
-                sentHeaders = true;
-              }
-
-              @Override
-              public void sendMessage(RespT message) {
-                if (!sentHeaders) {
-                  sendHeaders(new Metadata.Headers());
-                }
-                super.sendMessage(message);
               }
 
               @Override
@@ -121,13 +112,13 @@ public class TestUtils {
    * {@link #echoRequestHeadersInterceptor}.
    */
   public static ServerInterceptor recordRequestHeadersInterceptor(
-      final AtomicReference<Metadata.Headers> headersCapture) {
+      final AtomicReference<Metadata> headersCapture) {
     return new ServerInterceptor() {
       @Override
       public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
           MethodDescriptor<ReqT, RespT> method,
           ServerCall<RespT> call,
-          Metadata.Headers requestHeaders,
+          Metadata requestHeaders,
           ServerCallHandler<ReqT, RespT> next) {
         headersCapture.set(requestHeaders);
         return next.startCall(method, call, requestHeaders);
@@ -220,15 +211,6 @@ public class TestUtils {
     }
 
     return tmpFile;
-  }
-
-  /**
-   * Deprecated, please use {@link #newSslSocketFactoryForCa(File)} instead.
-   */
-  @Deprecated
-  public static SSLSocketFactory getSslSocketFactoryForCertainCert(File certChainFile)
-          throws Exception {
-    return newSslSocketFactoryForCa(certChainFile);
   }
 
   /**

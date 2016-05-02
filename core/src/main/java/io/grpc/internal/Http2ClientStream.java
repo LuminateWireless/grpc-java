@@ -46,7 +46,6 @@ import javax.annotation.Nullable;
  */
 public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
 
-  private static final boolean TEMP_CHECK_CONTENT_TYPE = false;
   /**
    * Metadata marshaller for HTTP status lines.
    */
@@ -71,8 +70,9 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
   private boolean contentTypeChecked;
 
   protected Http2ClientStream(WritableBufferAllocator bufferAllocator,
-                              ClientStreamListener listener) {
-    super(bufferAllocator, listener);
+                              ClientStreamListener listener,
+                              int maxMessageSize) {
+    super(bufferAllocator, listener, maxMessageSize);
   }
 
   /**
@@ -80,7 +80,7 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
    *
    * @param headers the received headers
    */
-  protected void transportHeadersReceived(Metadata.Headers headers) {
+  protected void transportHeadersReceived(Metadata headers) {
     Preconditions.checkNotNull(headers);
     if (transportError != null) {
       // Already received a transport error so just augment it.
@@ -166,7 +166,7 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
   private static Status statusFromHttpStatus(Metadata metadata) {
     Integer httpStatus = metadata.get(HTTP2_STATUS);
     if (httpStatus != null) {
-      Status status = HttpUtil.httpStatusToGrpcStatus(httpStatus);
+      Status status = GrpcUtil.httpStatusToGrpcStatus(httpStatus);
       return status.isOk() ? status
           : status.augmentDescription("extracted status from HTTP :status " + httpStatus);
     }
@@ -204,10 +204,11 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
       return null;
     }
     contentTypeChecked = true;
-    String contentType = headers.get(HttpUtil.CONTENT_TYPE_KEY);
-    if (TEMP_CHECK_CONTENT_TYPE && !HttpUtil.CONTENT_TYPE_GRPC.equalsIgnoreCase(contentType)) {
-      // Malformed content-type so report an error
-      return Status.INTERNAL.withDescription("invalid content-type " + contentType);
+    // Temporarily disable content type checking due to lacking content-type from C servers (#1021).
+    final boolean contentTypeChecking = false;
+    String contentType = headers.get(GrpcUtil.CONTENT_TYPE_KEY);
+    if (contentTypeChecking && !GrpcUtil.isGrpcContentType(contentType)) {
+      return Status.INTERNAL.withDescription("Invalid content-type: " + contentType);
     }
     return null;
   }
@@ -216,7 +217,7 @@ public abstract class Http2ClientStream extends AbstractClientStream<Integer> {
    * Inspect the raw metadata and figure out what charset is being used.
    */
   private static Charset extractCharset(Metadata headers) {
-    String contentType = headers.get(HttpUtil.CONTENT_TYPE_KEY);
+    String contentType = headers.get(GrpcUtil.CONTENT_TYPE_KEY);
     if (contentType != null) {
       String[] split = contentType.split("charset=");
       try {

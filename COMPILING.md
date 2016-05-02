@@ -27,13 +27,13 @@ This section is only necessary if you are making changes to the code
 generation. Most users only need to use `skipCodegen=true` as discussed above.
 
 ### Build Protobuf
-The codegen plugin is C++ code and requires protobuf 3.0.0-alpha-3.1.
+The codegen plugin is C++ code and requires protobuf 3.0.0-beta-1.
 
 For Linux, Mac and MinGW:
 ```
 $ git clone https://github.com/google/protobuf.git
 $ cd protobuf
-$ git checkout v3.0.0-alpha-3.1
+$ git checkout v3.0.0-beta-1
 $ ./autogen.sh
 $ ./configure
 $ make
@@ -48,8 +48,8 @@ environment variables will be used when building grpc-java.
 
 Protobuf installs to ``/usr/local`` by default.
 
-For Visual C++, please refer to the [Protobuf README](https://github.com/google/protobuf/blob/master/vsprojects/readme.txt)
-for how to compile Protobuf.
+For Visual C++, please refer to the [Protobuf README](https://github.com/google/protobuf/blob/master/cmake/README.md)
+for how to compile Protobuf. gRPC-java assumes a Release build.
 
 #### Linux and MinGW
 If ``/usr/local/lib`` is not in your library search path, you can add it by running:
@@ -72,20 +72,23 @@ When building on Windows and VC++, you need to specify project properties for
 Gradle to find protobuf:
 ```
 .\gradlew install ^
-    -PvcProtobufInclude=C:\path\to\protobuf-3.0.0-alpha-3.1\src ^
-    -PvcProtobufLibs=C:\path\to\protobuf-3.0.0-alpha-3.1\vsprojects\Release
+    -PvcProtobufInclude=C:\path\to\protobuf-3.0.0-beta-1\src ^
+    -PvcProtobufLibs=C:\path\to\protobuf-3.0.0-beta-1\vsprojects\Release ^
+    -PtargetArch=x86_32
 ```
 
 Since specifying those properties every build is bothersome, you can instead
 create ``<project-root>\gradle.properties`` with contents like:
 ```
-vcProtobufInclude=C:\\path\\to\\protobuf-3.0.0-alpha-3.1\\src
-vcProtobufLibs=C:\\path\\to\\protobuf-3.0.0-alpha-3.1\\vsprojects\\Release
+vcProtobufInclude=C:\\path\\to\\protobuf-3.0.0-beta-1\\src
+vcProtobufLibs=C:\\path\\to\\protobuf-3.0.0-beta-1\\vsprojects\\Release
+targetArch=x86_32
 ```
 
-The build script will build the codegen for the same architecture as the Java
-runtime installed on your system. If you are using 64-bit JVM, the codegen will
-be compiled for 64-bit, that means you must have compiled Protobuf in 64-bit.
+By default, the build script will build the codegen for the same architecture as
+the Java runtime installed on your system. If you are using 64-bit JVM, the
+codegen will be compiled for 64-bit. Since Protobuf is only built for 32-bit by
+default, the `targetArch=x86_32` is necessary.
 
 ### Notes for MinGW on Windows
 If you have both MinGW and VC++ installed on Windows, VC++ will be used by

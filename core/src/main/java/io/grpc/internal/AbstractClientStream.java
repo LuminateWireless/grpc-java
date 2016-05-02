@@ -31,8 +31,8 @@
 
 package io.grpc.internal;
 
-import static io.grpc.Status.Code.CANCELLED;
-import static io.grpc.Status.Code.DEADLINE_EXCEEDED;
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.grpc.internal.GrpcUtil.CANCEL_REASONS;
 
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
@@ -41,7 +41,6 @@ import io.grpc.Metadata;
 import io.grpc.Status;
 
 import java.io.InputStream;
-import java.util.EnumSet;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -62,15 +61,10 @@ public abstract class AbstractClientStream<IdT> extends AbstractStream<IdT>
   private Metadata trailers;
   private Runnable closeListenerTask;
 
-
-  /**
-   * Constructor used by subclasses.
-   *
-   * @param listener the listener to receive notifications
-   */
   protected AbstractClientStream(WritableBufferAllocator bufferAllocator,
-                                 ClientStreamListener listener) {
-    super(bufferAllocator);
+                                 ClientStreamListener listener,
+                                 int maxMessageSize) {
+    super(bufferAllocator, maxMessageSize);
     this.listener = Preconditions.checkNotNull(listener);
   }
 
@@ -111,11 +105,27 @@ public abstract class AbstractClientStream<IdT> extends AbstractStream<IdT>
    *
    * @param headers the parsed headers
    */
-  protected void inboundHeadersReceived(Metadata.Headers headers) {
+  protected void inboundHeadersReceived(Metadata headers) {
     if (inboundPhase() == Phase.STATUS) {
       log.log(Level.INFO, "Received headers on closed stream {0} {1}",
           new Object[]{id(), headers});
     }
+    if (headers.containsKey(GrpcUtil.MESSAGE_ENCODING_KEY)) {
+      String messageEncoding = headers.get(GrpcUtil.MESSAGE_ENCODING_KEY);
+      try {
+        setDecompressor(messageEncoding);
+      } catch (IllegalArgumentException e) {
+        // Don't use INVALID_ARGUMENT since that is for servers to send clients.
+        Status status = Status.INTERNAL.withDescription("Unable to decompress message from server.")
+            .withCause(e);
+        // TODO(carl-mastrangelo): look back into tearing down this stream.  sendCancel() can be
+        // buffered.
+        inboundTransportError(status);
+        sendCancel(status);
+        return;
+      }
+    }
+
     inboundPhase(Phase.MESSAGE);
     listener.headersRead(headers);
   }
@@ -282,8 +292,7 @@ public abstract class AbstractClientStream<IdT> extends AbstractStream<IdT>
    */
   @Override
   public final void cancel(Status reason) {
-    Preconditions.checkArgument(EnumSet.of(CANCELLED, DEADLINE_EXCEEDED).contains(reason.getCode()),
-        "Invalid cancellation reason");
+    checkArgument(CANCEL_REASONS.contains(reason.getCode()), "Invalid cancellation reason");
     outboundPhase(Phase.STATUS);
     sendCancel(reason);
     dispose();

@@ -84,4 +84,9 @@ class InProcessServer implements Server {
     }
     return listener.transportCreated(transport);
   }
+  
+  @Override
+  public String localAddress() {
+    return this.name;
+  }
 }

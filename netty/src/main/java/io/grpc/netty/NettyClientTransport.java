@@ -31,6 +31,7 @@
 
 package io.grpc.netty;
 
+import static io.grpc.internal.GrpcUtil.AUTHORITY_KEY;
 import static io.netty.channel.ChannelOption.SO_KEEPALIVE;
 
 import com.google.common.base.Preconditions;
@@ -46,6 +47,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http2.DefaultHttp2Connection;
@@ -62,7 +64,6 @@ import io.netty.handler.codec.http2.Http2OutboundFrameLogger;
 import io.netty.handler.logging.LogLevel;
 import io.netty.util.AsciiString;
 
-import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.concurrent.Executor;
 
@@ -79,6 +80,7 @@ class NettyClientTransport implements ClientTransport {
   private final NettyClientHandler handler;
   private final AsciiString authority;
   private final int flowControlWindow;
+  private final int maxMessageSize;
   // We should not send on the channel until negotiation completes. This is a hard requirement
   // by SslHandler but is appropriate for HTTP/1.1 Upgrade as well.
   private Channel channel;
@@ -92,22 +94,15 @@ class NettyClientTransport implements ClientTransport {
 
   NettyClientTransport(SocketAddress address, Class<? extends Channel> channelType,
                        EventLoopGroup group, ProtocolNegotiator negotiator,
-                       int flowControlWindow) {
+                       int flowControlWindow, int maxMessageSize, String authority) {
     Preconditions.checkNotNull(negotiator, "negotiator");
     this.address = Preconditions.checkNotNull(address, "address");
     this.group = Preconditions.checkNotNull(group, "group");
     this.channelType = Preconditions.checkNotNull(channelType, "channelType");
     this.flowControlWindow = flowControlWindow;
-
-    if (address instanceof InetSocketAddress) {
-      InetSocketAddress inetAddress = (InetSocketAddress) address;
-      authority = new AsciiString(inetAddress.getHostString() + ":" + inetAddress.getPort());
-    } else {
-      // Specialized address types are allowed to support custom Channel types so just assume their
-      // toString() values are valid :authority values
-      authority = new AsciiString(address.toString());
-    }
-
+    this.maxMessageSize = maxMessageSize;
+    this.authority = new AsciiString(authority);
+    
     handler = newHandler();
     negotiationHandler = negotiator.newHandler(handler);
   }
@@ -119,19 +114,23 @@ class NettyClientTransport implements ClientTransport {
   }
 
   @Override
-  public ClientStream newStream(MethodDescriptor<?, ?> method, Metadata.Headers headers,
+  public ClientStream newStream(MethodDescriptor<?, ?> method, Metadata headers,
       ClientStreamListener listener) {
     Preconditions.checkNotNull(method, "method");
     Preconditions.checkNotNull(headers, "headers");
     Preconditions.checkNotNull(listener, "listener");
 
     // Create the stream.
-    final NettyClientStream stream = new NettyClientStream(listener, channel, handler);
+    final NettyClientStream stream = new NettyClientStream(listener, channel, handler,
+        maxMessageSize);
 
     // Convert the headers into Netty HTTP/2 headers.
     AsciiString defaultPath = new AsciiString("/" + method.getFullMethodName());
+    AsciiString defaultAuthority  = new AsciiString(headers.containsKey(AUTHORITY_KEY)
+        ? headers.get(AUTHORITY_KEY) : authority);
+    headers.removeAll(AUTHORITY_KEY);
     Http2Headers http2Headers = Utils.convertClientHeaders(headers, negotiationHandler.scheme(),
-        defaultPath, authority);
+        defaultPath, defaultAuthority);
 
     ChannelFutureListener failureListener = new ChannelFutureListener() {
       @Override
@@ -188,9 +187,7 @@ class NettyClientTransport implements ClientTransport {
     channel.write(NettyClientHandler.NOOP_MESSAGE).addListener(new ChannelFutureListener() {
       @Override
       public void operationComplete(ChannelFuture future) throws Exception {
-        if (future.isSuccess()) {
-          listener.transportReady();
-        } else {
+        if (!future.isSuccess()) {
           // Need to notify of this failure, because handler.connectionError() is not guaranteed to
           // have seen this cause.
           notifyTerminated(Status.fromThrowable(future.cause()));
@@ -219,6 +216,11 @@ class NettyClientTransport implements ClientTransport {
     if (channel != null && channel.isOpen()) {
       channel.close();
     }
+  }
+  
+  @Override
+  public String remoteAddress() {
+    return address.toString();
   }
 
   private void notifyShutdown(Status status) {
@@ -255,7 +257,18 @@ class NettyClientTransport implements ClientTransport {
     frameWriter = new Http2OutboundFrameLogger(frameWriter, frameLogger);
 
     BufferingHttp2ConnectionEncoder encoder = new BufferingHttp2ConnectionEncoder(
-            new DefaultHttp2ConnectionEncoder(connection, frameWriter));
+            new DefaultHttp2ConnectionEncoder(connection, frameWriter)) {
+      private boolean firstSettings = true;
+
+      @Override
+      public ChannelFuture writeSettingsAck(ChannelHandlerContext ctx, ChannelPromise promise) {
+        if (firstSettings) {
+          listener.transportReady();
+          firstSettings = false;
+        }
+        return super.writeSettingsAck(ctx, promise);
+      }
+    };
     return new NettyClientHandler(encoder, connection, frameReader, flowControlWindow);
   }
 }

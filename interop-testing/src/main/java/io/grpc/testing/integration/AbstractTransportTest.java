@@ -32,7 +32,6 @@
 package io.grpc.testing.integration;
 
 import static io.grpc.testing.integration.Messages.PayloadType.COMPRESSABLE;
-import static io.grpc.testing.integration.Util.assertEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -48,22 +47,25 @@ import com.google.auth.oauth2.ComputeEngineCredentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.OAuth2Credentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
+import com.google.auth.oauth2.ServiceAccountJwtAccessCredentials;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.EmptyProtos.Empty;
 
-import io.grpc.AbstractServerBuilder;
 import io.grpc.CallOptions;
-import io.grpc.ChannelImpl;
 import io.grpc.ClientCall;
+import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
-import io.grpc.ServerImpl;
+import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.auth.ClientAuthInterceptor;
+import io.grpc.internal.AbstractServerImplBuilder;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.protobuf.ProtoUtils;
 import io.grpc.stub.MetadataUtils;
 import io.grpc.stub.StreamObserver;
-import io.grpc.stub.StreamRecorder;
+import io.grpc.testing.StreamRecorder;
 import io.grpc.testing.TestUtils;
 import io.grpc.testing.integration.Messages.Payload;
 import io.grpc.testing.integration.Messages.PayloadType;
@@ -98,13 +100,13 @@ public abstract class AbstractTransportTest {
 
   public static final Metadata.Key<Messages.SimpleContext> METADATA_KEY =
       ProtoUtils.keyForProto(Messages.SimpleContext.getDefaultInstance());
-  private static final AtomicReference<Metadata.Headers> requestHeadersCapture =
-      new AtomicReference<Metadata.Headers>();
+  private static final AtomicReference<Metadata> requestHeadersCapture =
+      new AtomicReference<Metadata>();
   private static ScheduledExecutorService testServiceExecutor;
-  private static ServerImpl server;
+  private static Server server;
   private static int OPERATION_TIMEOUT = 5000;
 
-  protected static void startStaticServer(AbstractServerBuilder<?> builder) {
+  protected static void startStaticServer(AbstractServerImplBuilder<?> builder) {
     testServiceExecutor = Executors.newScheduledThreadPool(2);
 
     builder.addService(ServerInterceptors.intercept(
@@ -123,7 +125,7 @@ public abstract class AbstractTransportTest {
     testServiceExecutor.shutdown();
   }
 
-  protected ChannelImpl channel;
+  protected ManagedChannel channel;
   protected TestServiceGrpc.TestServiceBlockingStub blockingStub;
   protected TestServiceGrpc.TestService asyncStub;
 
@@ -146,7 +148,7 @@ public abstract class AbstractTransportTest {
     }
   }
 
-  protected abstract ChannelImpl createChannel();
+  protected abstract ManagedChannel createChannel();
 
   @Test(timeout = 10000)
   public void emptyUnary() throws Exception {
@@ -239,7 +241,7 @@ public abstract class AbstractTransportTest {
     StreamObserver<StreamingInputCallRequest> requestObserver =
         asyncStub.streamingInputCall(responseObserver);
     for (StreamingInputCallRequest request : requests) {
-      requestObserver.onValue(request);
+      requestObserver.onNext(request);
     }
     requestObserver.onCompleted();
     assertEquals(goldenResponse, responseObserver.firstValue().get());
@@ -299,8 +301,8 @@ public abstract class AbstractTransportTest {
     StreamObserver<StreamingOutputCallRequest> requestObserver
         = asyncStub.fullDuplexCall(responseObserver);
     for (int i = 0; i < requests.size(); i++) {
-      requestObserver.onValue(requests.get(i));
-      verify(responseObserver, timeout(OPERATION_TIMEOUT)).onValue(goldenResponses.get(i));
+      requestObserver.onNext(requests.get(i));
+      verify(responseObserver, timeout(OPERATION_TIMEOUT)).onNext(goldenResponses.get(i));
       verifyNoMoreInteractions(responseObserver);
     }
     requestObserver.onCompleted();
@@ -348,8 +350,8 @@ public abstract class AbstractTransportTest {
     StreamObserver<StreamingOutputCallResponse> responseObserver = mock(StreamObserver.class);
     StreamObserver<StreamingOutputCallRequest> requestObserver
         = asyncStub.fullDuplexCall(responseObserver);
-    requestObserver.onValue(request);
-    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onValue(goldenResponse);
+    requestObserver.onNext(request);
+    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onNext(goldenResponse);
     verifyNoMoreInteractions(responseObserver);
 
     requestObserver.onError(new RuntimeException());
@@ -377,7 +379,7 @@ public abstract class AbstractTransportTest {
 
     final int numRequests = 10;
     for (int ix = numRequests; ix > 0; --ix) {
-      requestStream.onValue(request);
+      requestStream.onNext(request);
     }
     requestStream.onCompleted();
     recorder.awaitCompletion();
@@ -409,7 +411,7 @@ public abstract class AbstractTransportTest {
 
     final int numRequests = 10;
     for (int ix = numRequests; ix > 0; --ix) {
-      requestStream.onValue(request);
+      requestStream.onNext(request);
     }
     requestStream.onCompleted();
     recorder.awaitCompletion();
@@ -448,7 +450,7 @@ public abstract class AbstractTransportTest {
         channel.newCall(TestServiceGrpc.METHOD_STREAMING_OUTPUT_CALL, CallOptions.DEFAULT);
     call.start(new ClientCall.Listener<StreamingOutputCallResponse>() {
       @Override
-      public void onHeaders(Metadata.Headers headers) {}
+      public void onHeaders(Metadata headers) {}
 
       @Override
       public void onMessage(final StreamingOutputCallResponse message) {
@@ -459,7 +461,7 @@ public abstract class AbstractTransportTest {
       public void onClose(Status status, Metadata trailers) {
         queue.add(status);
       }
-    }, new Metadata.Headers());
+    }, new Metadata());
     call.sendMessage(request);
     call.halfClose();
 
@@ -520,7 +522,7 @@ public abstract class AbstractTransportTest {
         TestServiceGrpc.newBlockingStub(channel);
 
     // Capture the context exchange
-    Metadata.Headers fixedHeaders = new Metadata.Headers();
+    Metadata fixedHeaders = new Metadata();
     // Send a context proto (as it's in the default extension registry)
     Messages.SimpleContext contextValue =
         Messages.SimpleContext.newBuilder().setValue("dog").build();
@@ -528,7 +530,7 @@ public abstract class AbstractTransportTest {
     stub = MetadataUtils.attachHeaders(stub, fixedHeaders);
     // .. and expect it to be echoed back in trailers
     AtomicReference<Metadata> trailersCapture = new AtomicReference<Metadata>();
-    AtomicReference<Metadata.Headers> headersCapture = new AtomicReference<Metadata.Headers>();
+    AtomicReference<Metadata> headersCapture = new AtomicReference<Metadata>();
     stub = MetadataUtils.captureMetadata(stub, headersCapture, trailersCapture);
 
     Assert.assertNotNull(stub.emptyCall(Empty.getDefaultInstance()));
@@ -543,7 +545,7 @@ public abstract class AbstractTransportTest {
     TestServiceGrpc.TestServiceStub stub = TestServiceGrpc.newStub(channel);
 
     // Capture the context exchange
-    Metadata.Headers fixedHeaders = new Metadata.Headers();
+    Metadata fixedHeaders = new Metadata();
     // Send a context proto (as it's in the default extension registry)
     Messages.SimpleContext contextValue =
         Messages.SimpleContext.newBuilder().setValue("dog").build();
@@ -551,7 +553,7 @@ public abstract class AbstractTransportTest {
     stub = MetadataUtils.attachHeaders(stub, fixedHeaders);
     // .. and expect it to be echoed back in trailers
     AtomicReference<Metadata> trailersCapture = new AtomicReference<Metadata>();
-    AtomicReference<Metadata.Headers> headersCapture = new AtomicReference<Metadata.Headers>();
+    AtomicReference<Metadata> headersCapture = new AtomicReference<Metadata>();
     stub = MetadataUtils.captureMetadata(stub, headersCapture, trailersCapture);
 
     List<Integer> responseSizes = Arrays.asList(50, 100, 150, 200);
@@ -569,7 +571,7 @@ public abstract class AbstractTransportTest {
 
     final int numRequests = 10;
     for (int ix = numRequests; ix > 0; --ix) {
-      requestStream.onValue(request);
+      requestStream.onNext(request);
     }
     requestStream.onCompleted();
     recorder.awaitCompletion();
@@ -588,12 +590,12 @@ public abstract class AbstractTransportTest {
         .withDeadlineAfter(configuredTimeoutMinutes, TimeUnit.MINUTES);
     stub.emptyCall(Empty.getDefaultInstance());
     long transferredTimeoutMinutes = TimeUnit.MICROSECONDS.toMinutes(
-        requestHeadersCapture.get().get(ChannelImpl.TIMEOUT_KEY));
+        requestHeadersCapture.get().get(GrpcUtil.TIMEOUT_KEY));
     Assert.assertTrue(
         "configuredTimeoutMinutes=" + configuredTimeoutMinutes
-        + ", transferredTimeoutMinutes=" + transferredTimeoutMinutes,
+            + ", transferredTimeoutMinutes=" + transferredTimeoutMinutes,
         configuredTimeoutMinutes - transferredTimeoutMinutes >= 0
-        && configuredTimeoutMinutes - transferredTimeoutMinutes <= 1);
+            && configuredTimeoutMinutes - transferredTimeoutMinutes <= 1);
   }
 
   @Test
@@ -694,17 +696,56 @@ public abstract class AbstractTransportTest {
     StreamObserver<StreamingOutputCallResponse> responseObserver = mock(StreamObserver.class);
     StreamObserver<StreamingOutputCallRequest> requestObserver
         = asyncStub.fullDuplexCall(responseObserver);
-    requestObserver.onValue(requests.get(0));
-    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onValue(goldenResponses.get(0));
+    requestObserver.onNext(requests.get(0));
+    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onNext(goldenResponses.get(0));
     // Initiate graceful shutdown.
     channel.shutdown();
-    requestObserver.onValue(requests.get(1));
-    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onValue(goldenResponses.get(1));
+    requestObserver.onNext(requests.get(1));
+    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onNext(goldenResponses.get(1));
     // The previous ping-pong could have raced with the shutdown, but this one certainly shouldn't.
-    requestObserver.onValue(requests.get(2));
-    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onValue(goldenResponses.get(2));
+    requestObserver.onNext(requests.get(2));
+    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onNext(goldenResponses.get(2));
     requestObserver.onCompleted();
     verify(responseObserver, timeout(OPERATION_TIMEOUT)).onCompleted();
+    verifyNoMoreInteractions(responseObserver);
+  }
+
+  /** Sends an rpc to an unimplemented method on the server. */
+  @Test(timeout = 10000)
+  public void unimplementedMethod() {
+    UnimplementedServiceGrpc.UnimplementedServiceBlockingStub stub =
+        UnimplementedServiceGrpc.newBlockingStub(channel);
+    try {
+      stub.unimplementedCall(Empty.getDefaultInstance());
+      fail();
+    } catch (StatusRuntimeException e) {
+      assertEquals(Status.UNIMPLEMENTED.getCode(), e.getStatus().getCode());
+    }
+  }
+
+  /** Start a fullDuplexCall which the server will not respond, and verify the deadline expires. */
+  @Test(timeout = 10000)
+  public void timeoutOnSleepingServer() {
+    TestServiceGrpc.TestService stub = TestServiceGrpc.newStub(channel)
+        .withDeadlineAfter(1, TimeUnit.MILLISECONDS);
+    @SuppressWarnings("unchecked")
+    StreamObserver<StreamingOutputCallResponse> responseObserver = mock(StreamObserver.class);
+    StreamObserver<StreamingOutputCallRequest> requestObserver
+        = stub.fullDuplexCall(responseObserver);
+
+    try {
+      requestObserver.onNext(StreamingOutputCallRequest.newBuilder()
+          .setPayload(Payload.newBuilder()
+              .setBody(ByteString.copyFrom(new byte[27182])))
+          .build());
+    } catch (IllegalStateException expected) {
+      // This can happen if the stream has already been terminated due to deadline exceeded.
+    }
+
+    ArgumentCaptor<Throwable> captor = ArgumentCaptor.forClass(Throwable.class);
+    verify(responseObserver, timeout(OPERATION_TIMEOUT)).onError(captor.capture());
+    assertEquals(Status.DEADLINE_EXCEEDED.getCode(),
+        Status.fromThrowable(captor.getValue()).getCode());
     verifyNoMoreInteractions(responseObserver);
   }
 
@@ -776,6 +817,29 @@ public abstract class AbstractTransportTest {
     assertEquals(goldenResponse, response);
   }
 
+  /** Test JWT-based auth. */
+  public void jwtTokenCreds(InputStream serviceAccountJson) throws Exception {
+    final SimpleRequest request = SimpleRequest.newBuilder()
+        .setResponseType(PayloadType.COMPRESSABLE)
+        .setResponseSize(314159)
+        .setPayload(Payload.newBuilder()
+            .setBody(ByteString.copyFrom(new byte[271828])))
+        .setFillUsername(true)
+        .build();
+
+    ServiceAccountCredentials origCreds = (ServiceAccountCredentials)
+        GoogleCredentials.fromStream(serviceAccountJson);
+    ServiceAccountJwtAccessCredentials credentials = new ServiceAccountJwtAccessCredentials(
+        origCreds.getClientId(), origCreds.getClientEmail(), origCreds.getPrivateKey(),
+        origCreds.getPrivateKeyId());
+    TestServiceGrpc.TestServiceBlockingStub stub = blockingStub
+        .withInterceptors(new ClientAuthInterceptor(credentials,
+            Executors.newSingleThreadExecutor()));
+    SimpleResponse response = stub.unaryCall(request);
+    assertEquals(origCreds.getClientEmail(), response.getUsername());
+    assertEquals(314159, response.getPayload().getBody().size());
+  }
+
   /** Sends a unary rpc with raw oauth2 access token credentials. */
   public void oauth2AuthToken(String jsonKey, InputStream credentialsStream, String authScope)
       throws Exception {
@@ -809,6 +873,15 @@ public abstract class AbstractTransportTest {
     assertFalse(response.getOauthScope().isEmpty());
     assertTrue("Received oauth scope: " + response.getOauthScope(),
         authScope.contains(response.getOauthScope()));
+  }
+
+  /** Sends a unary rpc with "per rpc" raw oauth2 access token credentials. */
+  public void perRpcCreds(String jsonKey, InputStream credentialsStream, String oauthScope)
+      throws Exception {
+    // In gRpc Java, we don't have per Rpc credentials, user can use an intercepted stub only once
+    // for that purpose.
+    // So, this test is identical to oauth2_auth_token test.
+    oauth2AuthToken(jsonKey, credentialsStream, oauthScope);
   }
 
   protected static void assertSuccess(StreamRecorder<?> recorder) {

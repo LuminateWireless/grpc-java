@@ -32,14 +32,13 @@
 package io.grpc.examples.header;
 
 import io.grpc.Channel;
-import io.grpc.ChannelImpl;
 import io.grpc.ClientInterceptor;
 import io.grpc.ClientInterceptors;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 import io.grpc.examples.helloworld.GreeterGrpc;
 import io.grpc.examples.helloworld.HelloRequest;
 import io.grpc.examples.helloworld.HelloResponse;
-import io.grpc.netty.NegotiationType;
-import io.grpc.netty.NettyChannelBuilder;
 
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -52,16 +51,16 @@ import java.util.logging.Logger;
 public class CustomHeaderClient {
   private static final Logger logger = Logger.getLogger(CustomHeaderClient.class.getName());
 
-  private final ChannelImpl originChannel;
+  private final ManagedChannel originChannel;
   private final GreeterGrpc.GreeterBlockingStub blockingStub;
 
   /**
    * A custom client.
    */
   private CustomHeaderClient(String host, int port) {
-    originChannel =
-            NettyChannelBuilder.forAddress(host, port).negotiationType(NegotiationType.PLAINTEXT)
-                    .build();
+    originChannel = ManagedChannelBuilder.forAddress(host, port)
+        .usePlaintext(true)
+        .build();
     ClientInterceptor interceptor = new HeaderClientInterceptor();
     Channel channel = ClientInterceptors.intercept(originChannel, interceptor);
     blockingStub = GreeterGrpc.newBlockingStub(channel);

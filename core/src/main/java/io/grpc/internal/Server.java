@@ -57,4 +57,9 @@ public interface Server {
    * method may only be called once.
    */
   void shutdown();
+  
+  /**
+   * @return the ip and port of server address. 
+   */
+  String localAddress();
 }

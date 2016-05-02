@@ -4,7 +4,7 @@ buildscript {
     mavenLocal()
   }
   dependencies {
-    classpath 'com.google.gradle:osdetector-gradle-plugin:1.2.1'
+    classpath 'com.google.gradle:osdetector-gradle-plugin:1.4.0'
   }
 }
 
@@ -13,12 +13,13 @@ subprojects {
     apply plugin: "java"
     apply plugin: "maven"
     apply plugin: "idea"
-    apply plugin: "osdetector"
     apply plugin: "signing"
     apply plugin: "jacoco"
 
+    apply plugin: "com.google.osdetector"
+
     group = "io.grpc"
-    version = "0.9.0-SNAPSHOT"
+    version = "0.9.1-SNAPSHOT"
 
     sourceCompatibility = 1.6
     targetCompatibility = 1.6
@@ -28,9 +29,9 @@ subprojects {
         mavenLocal()
     }
 
-
     [compileJava, compileTestJava].each() {
-        it.options.compilerArgs += ["-Xlint:unchecked", "-Xlint:deprecation", "-Xlint:-options"]
+        it.options.compilerArgs += ["-Xlint:unchecked", "-Xlint:deprecation", "-Xlint:-options",
+            "-Xlint:rawtypes"]
         it.options.encoding = "UTF-8"
     }
 
@@ -53,7 +54,8 @@ subprojects {
         protocPluginBaseName = 'protoc-gen-grpc-java'
         javaPluginPath = "$rootDir/compiler/build/binaries/java_pluginExecutable/$protocPluginBaseName$exeSuffix"
 
-        protobufVersion = '3.0.0-alpha-3.1'
+        protobufVersion = '3.0.0-beta-1'
+        protobufNanoVersion = '3.0.0-alpha-4'
 
         configureProtoCompilation = {
           String generatedSourcePath = "${projectDir}/src/generated"
@@ -108,11 +110,13 @@ subprojects {
           }
         }
 
-        def tcnative_suffix = "";
-        if (osdetector.classifier in ["linux-x86_64", "osx-x86_64", "windows-x86_64"]) {
-            // The native code is only pre-compiled on certain platforms.
-            tcnative_suffix = ":" + osdetector.classifier
+        def tcnative_suffix = osdetector.classifier;
+        // Fedora variants use a different soname for OpenSSL than other linux distributions
+        // (see http://netty.io/wiki/forked-tomcat-native.html).
+        if (osdetector.os == "linux" && osdetector.release.isLike("fedora")) {
+            tcnative_suffix += "-fedora";
         }
+
         def epoll_suffix = "";
         if (osdetector.classifier in ["linux-x86_64"]) {
             // The native code is only pre-compiled on certain platforms.
@@ -123,18 +127,17 @@ subprojects {
                 // used to collect benchmark results
                 hdrhistogram: 'org.hdrhistogram:HdrHistogram:2.1.4',
                 hpack: 'com.twitter:hpack:0.10.1',
-                javaee_api: 'javax:javaee-api:7.0',
                 jsonp: 'org.glassfish:javax.json:1.0.4',
                 jsr305: 'com.google.code.findbugs:jsr305:3.0.0',
-                oauth_client: 'com.google.auth:google-auth-library-oauth2-http:0.2.0',
+                oauth_client: 'com.google.auth:google-auth-library-oauth2-http:0.3.0',
                 okhttp: 'com.squareup.okhttp:okhttp:2.4.0',
                 protobuf: "com.google.protobuf:protobuf-java:${protobufVersion}",
-                protobuf_nano: "com.google.protobuf.nano:protobuf-javanano:${protobufVersion}",
+                protobuf_nano: "com.google.protobuf.nano:protobuf-javanano:${protobufNanoVersion}",
                 protobuf_plugin: 'com.google.protobuf:protobuf-gradle-plugin:0.7.0',
 
-                netty: 'io.netty:netty-codec-http2:4.1.0.Beta5',
-                netty_tcnative: 'io.netty:netty-tcnative:1.1.33.Fork2' + tcnative_suffix,
-                netty_transport_native_epoll: 'io.netty:netty-transport-native-epoll:4.1.0.Beta5' + epoll_suffix,
+                netty: 'io.netty:netty-codec-http2:4.1.0.Beta6',
+                netty_tcnative: 'io.netty:netty-tcnative:1.1.33.Fork7:' + tcnative_suffix,
+                netty_transport_native_epoll: 'io.netty:netty-transport-native-epoll:4.1.0.Beta6' + epoll_suffix,
 
                 // Test dependencies.
                 junit: 'junit:junit:4.11',
@@ -154,14 +157,18 @@ subprojects {
     // Define a separate configuration for managing the dependency on Jetty alpnboot jar.
     configurations {
         alpnboot
+        tcnative
     }
 
     dependencies {
         testCompile libraries.junit,
                     libraries.mockito
 
-        // Make the Jetty alpnboot jar available to submodules via the alpnboot configuration.
+        // Configuration for modules that use Jetty ALPN
         alpnboot alpnboot_package_name
+
+        // Configuration for modules that use Netty tcnative (for OpenSSL).
+        tcnative libraries.netty_tcnative
     }
 
     signing {

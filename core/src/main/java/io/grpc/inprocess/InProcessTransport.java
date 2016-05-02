@@ -31,12 +31,15 @@
 
 package io.grpc.inprocess;
 
+import io.grpc.Compressor;
+import io.grpc.Decompressor;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.internal.ClientStream;
 import io.grpc.internal.ClientStreamListener;
 import io.grpc.internal.ClientTransport;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.ServerStream;
 import io.grpc.internal.ServerStreamListener;
 import io.grpc.internal.ServerTransport;
@@ -83,7 +86,7 @@ class InProcessTransport implements ServerTransport, ClientTransport {
     if (serverTransportListener == null) {
       shutdownStatus = Status.UNAVAILABLE.withDescription("Could not find server: " + name);
       final Status localShutdownStatus = shutdownStatus;
-      new Thread(new Runnable() {
+      Thread shutdownThread = new Thread(new Runnable() {
         @Override
         public void run() {
           synchronized (InProcessTransport.this) {
@@ -91,25 +94,32 @@ class InProcessTransport implements ServerTransport, ClientTransport {
             notifyTerminated();
           }
         }
-      }).start();
+      });
+      shutdownThread.setDaemon(true);
+      shutdownThread.setName("grpc-inprocess-shutdown");
+      shutdownThread.start();
     }
-    new Thread(new Runnable() {
+    Thread readyThread = new Thread(new Runnable() {
       @Override
       public void run() {
         synchronized (InProcessTransport.this) {
           clientTransportListener.transportReady();
         }
       }
-    }).start();
+    });
+    readyThread.setDaemon(true);
+    readyThread.setName("grpc-inprocess-ready");
+    readyThread.start();
   }
 
   @Override
   public synchronized ClientStream newStream(MethodDescriptor<?, ?> method,
-      Metadata.Headers headers, ClientStreamListener clientStreamListener) {
+      Metadata headers, ClientStreamListener clientStreamListener) {
     if (shutdownStatus != null) {
       clientStreamListener.closed(shutdownStatus, new Metadata());
       return new NoopClientStream();
     }
+    headers.removeAll(GrpcUtil.AUTHORITY_KEY);
     InProcessStream stream = new InProcessStream();
     stream.serverStream.setListener(clientStreamListener);
     ServerStreamListener serverStreamListener = serverTransportListener.streamCreated(
@@ -205,6 +215,18 @@ class InProcessTransport implements ServerTransport, ClientTransport {
       }
 
       @Override
+      public void setCompressor(Compressor c) {
+        // I don't *think* there is any good reason to do this, so just throw away the compressor
+        // intentional nop
+      }
+
+      @Override
+      public void setDecompressor(Decompressor d) {}
+
+      @Override
+      public void setDecompressor(String messageEncoding) {}
+
+      @Override
       public void request(int numMessages) {
         clientStream.serverRequested(numMessages);
       }
@@ -258,7 +280,7 @@ class InProcessTransport implements ServerTransport, ClientTransport {
       }
 
       @Override
-      public synchronized void writeHeaders(Metadata.Headers headers) {
+      public synchronized void writeHeaders(Metadata headers) {
         if (closed) {
           return;
         }
@@ -414,6 +436,21 @@ class InProcessTransport implements ServerTransport, ClientTransport {
           serverNotifyHalfClose = true;
         }
       }
+
+      @Override
+      public void setCompressor(Compressor c) {
+        // nop
+      }
+
+      @Override
+      public void setDecompressor(Decompressor d) {
+        // nop
+      }
+
+      @Override
+      public void setDecompressor(String messageEncoding) {
+        // nop
+      }
     }
   }
 
@@ -437,5 +474,25 @@ class InProcessTransport implements ServerTransport, ClientTransport {
 
     @Override
     public void halfClose() {}
+
+    @Override
+    public void setCompressor(Compressor c) {
+      // very much a nop
+    }
+
+    @Override
+    public void setDecompressor(Decompressor d) {
+      // nop
+    }
+
+    @Override
+    public void setDecompressor(String messageEncoding) {
+      // nop
+    }
+  }
+  
+  @Override
+  public String remoteAddress() {
+    return "";
   }
 }

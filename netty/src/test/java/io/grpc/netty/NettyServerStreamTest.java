@@ -31,6 +31,7 @@
 
 package io.grpc.netty;
 
+import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 import static io.grpc.netty.NettyTestUtil.messageFrame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -50,6 +51,7 @@ import static org.mockito.Mockito.when;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.internal.ServerStreamListener;
+
 import io.netty.buffer.EmptyByteBuf;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelPromise;
@@ -69,7 +71,7 @@ import java.io.ByteArrayInputStream;
 
 /** Unit tests for {@link NettyServerStream}. */
 @RunWith(JUnit4.class)
-public class NettyServerStreamTest extends NettyStreamTestBase {
+public class NettyServerStreamTest extends NettyStreamTestBase<NettyServerStream> {
   @Mock
   protected ServerStreamListener serverListener;
 
@@ -90,13 +92,14 @@ public class NettyServerStreamTest extends NettyStreamTestBase {
 
   @Test
   public void writeMessageShouldSendResponse() throws Exception {
-    byte[] msg = smallMessage();
-    stream.writeMessage(new ByteArrayInputStream(msg));
-    stream.flush();
+    stream.writeHeaders(new Metadata());
     Http2Headers headers = new DefaultHttp2Headers()
         .status(Utils.STATUS_OK)
         .set(Utils.CONTENT_TYPE_HEADER, Utils.CONTENT_TYPE_GRPC);
     verify(writeQueue).enqueue(new SendResponseHeadersCommand(STREAM_ID, headers, false), true);
+    byte[] msg = smallMessage();
+    stream.writeMessage(new ByteArrayInputStream(msg));
+    stream.flush();
     verify(writeQueue).enqueue(eq(new SendGrpcFrameCommand(stream, messageFrame(MESSAGE), false)),
         any(ChannelPromise.class),
         eq(true));
@@ -104,7 +107,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase {
 
   @Test
   public void writeHeadersShouldSendHeaders() throws Exception {
-    Metadata.Headers headers = new Metadata.Headers();
+    Metadata headers = new Metadata();
     stream().writeHeaders(headers);
     verify(writeQueue).enqueue(new SendResponseHeadersCommand(STREAM_ID,
         Utils.convertServerHeaders(headers), false), true);
@@ -112,7 +115,7 @@ public class NettyServerStreamTest extends NettyStreamTestBase {
 
   @Test
   public void duplicateWriteHeadersShouldFail() throws Exception {
-    Metadata.Headers headers = new Metadata.Headers();
+    Metadata headers = new Metadata();
     stream().writeHeaders(headers);
     verify(writeQueue).enqueue(new SendResponseHeadersCommand(STREAM_ID,
         Utils.convertServerHeaders(headers), false), true);
@@ -254,13 +257,19 @@ public class NettyServerStreamTest extends NettyStreamTestBase {
       }
     }).when(writeQueue).enqueue(any(), any(ChannelPromise.class), anyBoolean());
     when(writeQueue.enqueue(any(), anyBoolean())).thenReturn(future);
-    NettyServerStream stream = new NettyServerStream(channel, http2Stream, handler);
+    NettyServerStream stream = new NettyServerStream(channel, http2Stream, handler,
+            DEFAULT_MAX_MESSAGE_SIZE);
     stream.setListener(serverListener);
     assertTrue(stream.canReceive());
     assertTrue(stream.canSend());
     verify(serverListener, atLeastOnce()).onReady();
     verifyNoMoreInteractions(serverListener);
     return stream;
+  }
+
+  @Override
+  protected void sendHeadersIfServer() {
+    stream.writeHeaders(new Metadata());
   }
 
   @Override

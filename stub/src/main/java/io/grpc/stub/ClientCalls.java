@@ -55,6 +55,8 @@ import javax.annotation.Nullable;
  * that the runtime can vary behavior without requiring regeneration of the stub.
  */
 public class ClientCalls {
+  // Prevent instantiation
+  private ClientCalls() {}
 
   /**
    * Executes a unary call with a response {@link StreamObserver}.
@@ -188,7 +190,7 @@ public class ClientCalls {
 
   private static <ReqT, RespT> void startCall(ClientCall<ReqT, RespT> call,
       ClientCall.Listener<RespT> responseListener, boolean streamingResponse) {
-    call.start(responseListener, new Metadata.Headers());
+    call.start(responseListener, new Metadata());
     if (streamingResponse) {
       call.request(1);
     } else {
@@ -206,7 +208,7 @@ public class ClientCalls {
     }
 
     @Override
-    public void onValue(T value) {
+    public void onNext(T value) {
       call.sendMessage(value);
     }
 
@@ -237,7 +239,7 @@ public class ClientCalls {
     }
 
     @Override
-    public void onHeaders(Metadata.Headers headers) {
+    public void onHeaders(Metadata headers) {
     }
 
     @Override
@@ -248,7 +250,7 @@ public class ClientCalls {
             .asRuntimeException();
       }
       firstResponseReceived = true;
-      observer.onValue(message);
+      observer.onNext(message);
 
       if (streamingResponse) {
         // Request delivery of the next inbound message.
@@ -278,7 +280,7 @@ public class ClientCalls {
     }
 
     @Override
-    public void onHeaders(Metadata.Headers headers) {
+    public void onHeaders(Metadata headers) {
     }
 
     @Override
@@ -393,7 +395,7 @@ public class ClientCalls {
       private boolean done = false;
 
       @Override
-      public void onHeaders(Metadata.Headers headers) {
+      public void onHeaders(Metadata headers) {
       }
 
       @Override

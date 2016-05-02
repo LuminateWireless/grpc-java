@@ -31,15 +31,18 @@
 
 package io.grpc.internal;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Preconditions;
 
+import io.grpc.Codec;
+import io.grpc.Decompressor;
 import io.grpc.Status;
 
 import java.io.Closeable;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.zip.GZIPInputStream;
-import java.util.zip.ZipException;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
@@ -55,10 +58,6 @@ public class MessageDeframer implements Closeable {
   private static final int COMPRESSED_FLAG_MASK = 1;
   private static final int RESERVED_MASK = 0xFE;
 
-  public enum Compression {
-    NONE, GZIP
-  }
-
   /**
    * A listener of deframing events.
    */
@@ -66,6 +65,8 @@ public class MessageDeframer implements Closeable {
 
     /**
      * Called when the given number of bytes has been read from the input source of the deframer.
+     * This is typically used to indicate to the underlying transport that more data can be
+     * accepted.
      *
      * @param numBytes the number of bytes read from the deframer's input source.
      */
@@ -95,7 +96,8 @@ public class MessageDeframer implements Closeable {
   }
 
   private final Listener listener;
-  private final Compression compression;
+  private final int maxMessageSize;
+  private Decompressor decompressor;
   private State state = State.HEADER;
   private int requiredLength = HEADER_LENGTH;
   private boolean compressedFlag;
@@ -107,24 +109,28 @@ public class MessageDeframer implements Closeable {
   private boolean inDelivery = false;
 
   /**
-   * Creates a deframer. Compression will not be supported.
-   *
-   * @param listener listener for deframer events.
-   */
-  public MessageDeframer(Listener listener) {
-    this(listener, Compression.NONE);
-  }
-
-  /**
    * Create a deframer.
    *
    * @param listener listener for deframer events.
-   * @param compression the compression used if a compressed frame is encountered, with {@code NONE}
-   *        meaning unsupported
+   * @param decompressor the compression used if a compressed frame is encountered, with
+   *  {@code NONE} meaning unsupported
+   * @param maxMessageSize the maximum allowed size for received messages.
    */
-  public MessageDeframer(Listener listener, Compression compression) {
+  public MessageDeframer(Listener listener, Decompressor decompressor, int maxMessageSize) {
     this.listener = Preconditions.checkNotNull(listener, "sink");
-    this.compression = Preconditions.checkNotNull(compression, "compression");
+    this.decompressor = Preconditions.checkNotNull(decompressor, "decompressor");
+    this.maxMessageSize = maxMessageSize;
+  }
+
+  /**
+   * Sets the decompressor available to use.  The message encoding for the stream comes later in
+   * time, and thus will not be available at the time of construction.  This should only be set
+   * once, since the compression codec cannot change after the headers have been sent.
+   *
+   * @param decompressor the decompressing wrapper.
+   */
+  public void setDecompressor(Decompressor decompressor) {
+    this.decompressor = checkNotNull(decompressor, "Can't pass an empty decompressor");
   }
 
   /**
@@ -145,14 +151,14 @@ public class MessageDeframer implements Closeable {
   }
 
   /**
-   * Adds the given data to this deframer and attempts delivery to the sink.
+   * Adds the given data to this deframer and attempts delivery to the listener.
    *
    * @param data the raw data read from the remote endpoint. Must be non-null.
    * @param endOfStream if {@code true}, indicates that {@code data} is the end of the stream from
-   *        the remote endpoint.
+   *        the remote endpoint.  End of stream should not be used in the event of a transport
+   *        error, such as a stream reset.
    * @throws IllegalStateException if {@link #close()} has been called previously or if
-   *         {@link #deframe(ReadableBuffer, boolean)} has previously been called with
-   *         {@code endOfStream=true}.
+   *         this method has previously been called with {@code endOfStream=true}.
    */
   public void deframe(ReadableBuffer data, boolean endOfStream) {
     Preconditions.checkNotNull(data, "data");
@@ -161,8 +167,8 @@ public class MessageDeframer implements Closeable {
       checkNotClosed();
       Preconditions.checkState(!this.endOfStream, "Past end of stream");
 
-      needToCloseData = false;
       unprocessed.addBuffer(data);
+      needToCloseData = false;
 
       // Indicate that all of the data for this stream has been received.
       this.endOfStream = endOfStream;
@@ -175,7 +181,8 @@ public class MessageDeframer implements Closeable {
   }
 
   /**
-   * Indicates whether delivery is currently stalled, pending receipt of more data.
+   * Indicates whether delivery is currently stalled, pending receipt of more data.  This means
+   * that no additional data can be delivered to the application.
    */
   public boolean isStalled() {
     return deliveryStalled;
@@ -215,7 +222,7 @@ public class MessageDeframer implements Closeable {
   }
 
   /**
-   * Reads and delivers as many messages to the sink as possible.
+   * Reads and delivers as many messages to the listener as possible.
    */
   private void deliver() {
     // We can have reentrancy here when using a direct executor, triggered by calls to
@@ -226,7 +233,6 @@ public class MessageDeframer implements Closeable {
     inDelivery = true;
     try {
       // Process the uncompressed bytes.
-      boolean stalled = false;
       while (pendingDeliveries > 0 && readRequiredBytes()) {
         switch (state) {
           case HEADER:
@@ -244,24 +250,30 @@ public class MessageDeframer implements Closeable {
             throw new AssertionError("Invalid state: " + state);
         }
       }
-      // We are stalled when there are no more bytes to process. This allows delivering errors as
-      // soon as the buffered input has been consumed, independent of whether the application
-      // has requested another message.
-      stalled = !isDataAvailable();
 
-      if (endOfStream) {
-        if (!isDataAvailable()) {
+      /*
+       * We are stalled when there are no more bytes to process. This allows delivering errors as
+       * soon as the buffered input has been consumed, independent of whether the application
+       * has requested another message.  At this point in the function, either all frames have been
+       * delivered, or unprocessed is empty.  If there is a partial message, it will be inside next
+       * frame and not in unprocessed.  If there is extra data but no pending deliveries, it will
+       * be in unprocessed.
+       */
+      boolean stalled = unprocessed.readableBytes() == 0;
+
+      if (endOfStream && stalled) {
+        boolean havePartialMessage = nextFrame != null && nextFrame.readableBytes() > 0;
+        if (!havePartialMessage) {
           listener.endOfStream();
-        } else if (stalled) {
+          deliveryStalled = false;
+          return;
+        } else {
           // We've received the entire stream and have data available but we don't have
           // enough to read the next frame ... this is bad.
           throw Status.INTERNAL.withDescription("Encountered end-of-stream mid-frame")
               .asRuntimeException();
         }
       }
-
-      // Never indicate that we're stalled if we've received all the data for the stream.
-      stalled &= !endOfStream;
 
       // If we're transitioning to the stalled state, notify the listener.
       boolean previouslyStalled = deliveryStalled;
@@ -272,10 +284,6 @@ public class MessageDeframer implements Closeable {
     } finally {
       inDelivery = false;
     }
-  }
-
-  private boolean isDataAvailable() {
-    return unprocessed.readableBytes() > 0 || (nextFrame != null && nextFrame.readableBytes() > 0);
   }
 
   /**
@@ -323,6 +331,10 @@ public class MessageDeframer implements Closeable {
 
     // Update the required length to include the length of the frame.
     requiredLength = nextFrame.readInt();
+    if (requiredLength < 0 || requiredLength > maxMessageSize) {
+      throw Status.INTERNAL.withDescription(String.format("Frame size %d exceeds maximum: %d, ",
+              requiredLength, maxMessageSize)).asRuntimeException();
+    }
 
     // Continue reading the frame body.
     state = State.BODY;
@@ -347,22 +359,85 @@ public class MessageDeframer implements Closeable {
   }
 
   private InputStream getCompressedBody() {
-    if (compression == Compression.NONE) {
+    if (decompressor == Codec.Identity.NONE) {
       throw Status.INTERNAL.withDescription(
           "Can't decode compressed frame as compression not configured.").asRuntimeException();
     }
 
-    if (compression != Compression.GZIP) {
-      throw Status.INVALID_ARGUMENT.withDescription("Unknown compression type")
-          .asRuntimeException();
-    }
-
     try {
-      return new GZIPInputStream(ReadableBuffers.openStream(nextFrame, true));
-    } catch (ZipException e) {
-      throw Status.INTERNAL.withDescription("Decompression failed").asRuntimeException();
+      // Enforce the maxMessageSize limit on the returned stream.
+      return new SizeEnforcingInputStream(decompressor.decompress(
+              ReadableBuffers.openStream(nextFrame, true)));
     } catch (IOException e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  /**
+   * An {@link InputStream} that enforces the {@link #maxMessageSize} limit for compressed frames.
+   */
+  private final class SizeEnforcingInputStream extends FilterInputStream {
+    private long count;
+    private long mark = -1;
+
+    public SizeEnforcingInputStream(InputStream in) {
+      super(in);
+    }
+
+    @Override
+    public int read() throws IOException {
+      int result = in.read();
+      if (result != -1) {
+        count++;
+      }
+      verifySize();
+      return result;
+    }
+
+    @Override
+    public int read(byte[] b, int off, int len) throws IOException {
+      int result = in.read(b, off, len);
+      if (result != -1) {
+        count += result;
+      }
+      verifySize();
+      return result;
+    }
+
+    @Override
+    public long skip(long n) throws IOException {
+      long result = in.skip(n);
+      count += result;
+      verifySize();
+      return result;
+    }
+
+    @Override
+    public synchronized void mark(int readlimit) {
+      in.mark(readlimit);
+      mark = count;
+      // it's okay to mark even if mark isn't supported, as reset won't work
+    }
+
+    @Override
+    public synchronized void reset() throws IOException {
+      if (!in.markSupported()) {
+        throw new IOException("Mark not supported");
+      }
+      if (mark == -1) {
+        throw new IOException("Mark not set");
+      }
+
+      in.reset();
+      count = mark;
+    }
+
+    private void verifySize() {
+      if (count > maxMessageSize) {
+        throw Status.INTERNAL.withDescription(String.format(
+                "Compressed frame exceeds maximum frame size: %d. Bytes read: %d",
+                maxMessageSize, count)).asRuntimeException();
+      }
     }
   }
 }

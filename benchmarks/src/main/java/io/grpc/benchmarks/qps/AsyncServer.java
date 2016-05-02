@@ -34,7 +34,7 @@ package io.grpc.benchmarks.qps;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.protobuf.ByteString;
 
-import io.grpc.ServerImpl;
+import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NettyServerBuilder;
@@ -81,7 +81,7 @@ public class AsyncServer {
       return;
     }
 
-    final ServerImpl server = newServer(config);
+    final Server server = newServer(config);
     server.start();
 
     System.out.println("QPS Server started on " + config.address);
@@ -100,7 +100,7 @@ public class AsyncServer {
     });
   }
 
-  static ServerImpl newServer(ServerConfiguration config) throws IOException {
+  static Server newServer(ServerConfiguration config) throws IOException {
     SslContext sslContext = null;
     if (config.tls) {
       System.out.println("Using fake CA for TLS certificate.\n"
@@ -184,7 +184,7 @@ public class AsyncServer {
     @Override
     public void unaryCall(SimpleRequest request, StreamObserver<SimpleResponse> responseObserver) {
       SimpleResponse response = buildSimpleResponse(request);
-      responseObserver.onValue(response);
+      responseObserver.onNext(response);
       responseObserver.onCompleted();
     }
 
@@ -193,9 +193,9 @@ public class AsyncServer {
         final StreamObserver<SimpleResponse> responseObserver) {
       return new StreamObserver<SimpleRequest>() {
         @Override
-        public void onValue(SimpleRequest request) {
+        public void onNext(SimpleRequest request) {
           SimpleResponse response = buildSimpleResponse(request);
-          responseObserver.onValue(response);
+          responseObserver.onNext(response);
         }
 
         @Override

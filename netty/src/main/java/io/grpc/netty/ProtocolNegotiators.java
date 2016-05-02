@@ -34,11 +34,12 @@ package io.grpc.netty;
 import com.google.common.base.Preconditions;
 
 import io.grpc.Status;
-
+import io.grpc.internal.GrpcUtil;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.DefaultHttpRequest;
 import io.netty.handler.codec.http.HttpClientCodec;
@@ -47,16 +48,21 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http2.Http2ClientUpgradeCodec;
 import io.netty.handler.codec.http2.Http2ConnectionHandler;
-import io.netty.handler.ssl.OpenSslContext;
+import io.netty.handler.ssl.OpenSsl;
+import io.netty.handler.ssl.OpenSslEngine;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.util.ByteString;
 
-import java.net.InetSocketAddress;
+import java.net.URI;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Queue;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
+import javax.annotation.Nullable;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLParameters;
 
@@ -64,16 +70,59 @@ import javax.net.ssl.SSLParameters;
  * Common {@link ProtocolNegotiator}s used by gRPC.
  */
 public final class ProtocolNegotiators {
+  private static final Logger log = Logger.getLogger(ProtocolNegotiators.class.getName());
+
   private ProtocolNegotiators() {
   }
 
   /**
    * Create a TLS handler for HTTP/2 capable of using ALPN/NPN.
    */
-  public static ChannelHandler serverTls(SSLEngine sslEngine) {
+  public static ChannelHandler serverTls(SSLEngine sslEngine, final ChannelHandler grpcHandler) {
     Preconditions.checkNotNull(sslEngine, "sslEngine");
 
-    return new SslHandler(sslEngine, false);
+    final SslHandler sslHandler = new SslHandler(sslEngine, false);
+    return new ChannelInboundHandlerAdapter() {
+      @Override
+      public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+        super.handlerAdded(ctx);
+        ctx.pipeline().addFirst(sslHandler);
+      }
+
+      @Override
+      public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        fail(ctx, cause);
+      }
+
+      @Override
+      public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt instanceof SslHandshakeCompletionEvent) {
+          SslHandshakeCompletionEvent handshakeEvent = (SslHandshakeCompletionEvent) evt;
+          if (handshakeEvent.isSuccess()) {
+            if (sslHandler(ctx).applicationProtocol() != null) {
+              // Successfully negotiated the protocol. Replace this handler with
+              // the GRPC handler.
+              ctx.pipeline().replace(this, null, grpcHandler);
+            } else {
+              fail(ctx, new Exception(
+                  "Failed protocol negotiation: Unable to find compatible protocol."));
+            }
+          } else {
+            fail(ctx, handshakeEvent.cause());
+          }
+        }
+        super.userEventTriggered(ctx, evt);
+      }
+
+      private void fail(ChannelHandlerContext ctx, Throwable exception) {
+        logSslEngineDetails(Level.FINE, ctx, "TLS negotiation failed for new client.", exception);
+        ctx.close();
+      }
+
+      private SslHandler sslHandler(ChannelHandlerContext ctx) {
+        return ctx.pipeline().get(SslHandler.class);
+      }
+    };
   }
 
   /**
@@ -82,9 +131,9 @@ public final class ProtocolNegotiators {
    * may happen immediately, even before the TLS Handshake is complete.
    */
   public static ProtocolNegotiator tls(final SslContext sslContext,
-                                       final InetSocketAddress inetAddress) {
+                                       String authority) {
     Preconditions.checkNotNull(sslContext, "sslContext");
-    Preconditions.checkNotNull(inetAddress, "inetAddress");
+    final URI uri = GrpcUtil.authorityToUri(Preconditions.checkNotNull(authority, "authority"));
 
     return new ProtocolNegotiator() {
       @Override
@@ -92,17 +141,7 @@ public final class ProtocolNegotiators {
         ChannelHandler sslBootstrap = new ChannelHandlerAdapter() {
           @Override
           public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
-            final SSLEngine sslEngine;
-            if (sslContext instanceof OpenSslContext) {
-              // TODO(nmittler): Unsupported for OpenSSL in Netty < 4.1.Beta6.
-              // Until we upgrade Netty, uncomment the line below when testing with OpenSSL.
-              //sslEngine = sslContext.newEngine(ctx.alloc());
-              sslEngine = sslContext.newEngine(ctx.alloc(),
-                  inetAddress.getHostName(), inetAddress.getPort());
-            } else {
-              sslEngine = sslContext.newEngine(ctx.alloc(),
-                  inetAddress.getHostName(), inetAddress.getPort());
-            }
+            SSLEngine sslEngine = sslContext.newEngine(ctx.alloc(), uri.getHost(), uri.getPort());
             SSLParameters sslParams = new SSLParameters();
             sslParams.setEndpointIdentificationAlgorithm("HTTPS");
             sslEngine.setSSLParameters(sslParams);
@@ -147,6 +186,48 @@ public final class ProtocolNegotiators {
 
   private static RuntimeException unavailableException(String msg) {
     return Status.UNAVAILABLE.withDescription(msg).asRuntimeException();
+  }
+
+  private static void logSslEngineDetails(Level level, ChannelHandlerContext ctx, String msg,
+                                                @Nullable Throwable t) {
+    if (!log.isLoggable(level)) {
+      return;
+    }
+
+    SslHandler sslHandler = ctx.pipeline().get(SslHandler.class);
+    SSLEngine engine = sslHandler.engine();
+
+    StringBuilder builder = new StringBuilder(msg);
+    builder.append("\nSSLEngine Details: [\n");
+    if (engine instanceof OpenSslEngine) {
+      builder.append("    OpenSSL, ");
+      builder.append("Version: 0x").append(Integer.toHexString(OpenSsl.version()));
+      builder.append(" (").append(OpenSsl.versionString()).append("), ");
+      builder.append("ALPN supported: ").append(OpenSsl.isAlpnSupported());
+    } else if (JettyTlsUtil.isJettyAlpnConfigured()) {
+      builder.append("    Jetty ALPN");
+    } else if (JettyTlsUtil.isJettyNpnConfigured()) {
+      builder.append("    Jetty NPN");
+    }
+    builder.append("\n    TLS Protocol: ");
+    builder.append(engine.getSession().getProtocol());
+    builder.append("\n    Application Protocol: ");
+    builder.append(sslHandler.applicationProtocol());
+    builder.append("\n    Need Client Auth: " );
+    builder.append(engine.getNeedClientAuth());
+    builder.append("\n    Want Client Auth: ");
+    builder.append(engine.getWantClientAuth());
+    builder.append("\n    Supported protocols=");
+    builder.append(Arrays.toString(engine.getSupportedProtocols()));
+    builder.append("\n    Enabled protocols=");
+    builder.append(Arrays.toString(engine.getEnabledProtocols()));
+    builder.append("\n    Supported ciphers=");
+    builder.append(Arrays.toString(engine.getSupportedCipherSuites()));
+    builder.append("\n    Enabled ciphers=");
+    builder.append(Arrays.toString(engine.getEnabledCipherSuites()));
+    builder.append("\n]");
+
+    log.log(level, builder.toString(), t);
   }
 
   /**
@@ -310,7 +391,17 @@ public final class ProtocolNegotiators {
       if (evt instanceof SslHandshakeCompletionEvent) {
         SslHandshakeCompletionEvent handshakeEvent = (SslHandshakeCompletionEvent) evt;
         if (handshakeEvent.isSuccess()) {
-          writeBufferedAndRemove(ctx);
+          SslHandler handler = ctx.pipeline().get(SslHandler.class);
+          if (handler.applicationProtocol() != null) {
+            // Successfully negotiated the protocol.
+            logSslEngineDetails(Level.FINER, ctx, "TLS negotiation succeeded.", null);
+            writeBufferedAndRemove(ctx);
+          } else {
+            Exception ex = new Exception(
+                "Failed ALPN negotiation: Unable to find compatible protocol.");
+            logSslEngineDetails(Level.FINE, ctx, "TLS negotiation failed.", ex);
+            fail(ctx, ex);
+          }
         } else {
           fail(ctx, handshakeEvent.cause());
         }

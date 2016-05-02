@@ -40,8 +40,8 @@ import static java.lang.Math.sqrt;
 import static java.lang.Math.toRadians;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
-import io.grpc.ServerImpl;
-import io.grpc.netty.NettyServerBuilder;
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
 
 import java.io.IOException;
@@ -63,7 +63,7 @@ public class RouteGuideServer {
 
   private final int port;
   private final Collection<Feature> features;
-  private ServerImpl grpcServer;
+  private Server server;
 
   public RouteGuideServer(int port) {
     this(port, RouteGuideUtil.getDefaultFeaturesFile());
@@ -81,9 +81,10 @@ public class RouteGuideServer {
 
   /** Start serving requests. */
   public void start() throws IOException {
-    grpcServer = NettyServerBuilder.forPort(port)
+    server = ServerBuilder.forPort(port)
         .addService(RouteGuideGrpc.bindService(new RouteGuideService(features)))
-        .build().start();
+        .build()
+        .start();
     logger.info("Server started, listening on " + port);
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
@@ -98,14 +99,27 @@ public class RouteGuideServer {
 
   /** Stop serving requests and shutdown resources. */
   public void stop() {
-    if (grpcServer != null) {
-      grpcServer.shutdown();
+    if (server != null) {
+      server.shutdown();
     }
   }
 
+  /**
+   * Await termination on the main thread since the grpc library uses daemon threads.
+   */
+  private void blockUntilShutdown() throws InterruptedException {
+    if (server != null) {
+      server.awaitTermination();
+    }
+  }
+
+  /**
+   * Main method.  This comment makes the linter happy.
+   */
   public static void main(String[] args) throws Exception {
     RouteGuideServer server = new RouteGuideServer(8980);
     server.start();
+    server.blockUntilShutdown();
   }
 
   /**
@@ -131,7 +145,7 @@ public class RouteGuideServer {
      */
     @Override
     public void getFeature(Point request, StreamObserver<Feature> responseObserver) {
-      responseObserver.onValue(checkFeature(request));
+      responseObserver.onNext(checkFeature(request));
       responseObserver.onCompleted();
     }
 
@@ -156,7 +170,7 @@ public class RouteGuideServer {
         int lat = feature.getLocation().getLatitude();
         int lon = feature.getLocation().getLongitude();
         if (lon >= left && lon <= right && lat >= bottom && lat <= top) {
-          responseObserver.onValue(feature);
+          responseObserver.onNext(feature);
         }
       }
       responseObserver.onCompleted();
@@ -179,7 +193,7 @@ public class RouteGuideServer {
         long startTime = System.nanoTime();
 
         @Override
-        public void onValue(Point point) {
+        public void onNext(Point point) {
           pointCount++;
           if (RouteGuideUtil.exists(checkFeature(point))) {
             featureCount++;
@@ -200,7 +214,7 @@ public class RouteGuideServer {
         @Override
         public void onCompleted() {
           long seconds = NANOSECONDS.toSeconds(System.nanoTime() - startTime);
-          responseObserver.onValue(RouteSummary.newBuilder().setPointCount(pointCount)
+          responseObserver.onNext(RouteSummary.newBuilder().setPointCount(pointCount)
               .setFeatureCount(featureCount).setDistance(distance)
               .setElapsedTime((int) seconds).build());
           responseObserver.onCompleted();
@@ -219,12 +233,12 @@ public class RouteGuideServer {
     public StreamObserver<RouteNote> routeChat(final StreamObserver<RouteNote> responseObserver) {
       return new StreamObserver<RouteNote>() {
         @Override
-        public void onValue(RouteNote note) {
+        public void onNext(RouteNote note) {
           List<RouteNote> notes = getOrCreateNotes(note.getLocation());
 
           // Respond with all previous notes at this location.
           for (RouteNote prevNote : notes.toArray(new RouteNote[0])) {
-            responseObserver.onValue(prevNote);
+            responseObserver.onNext(prevNote);
           }
 
           // Now add the new note to the list

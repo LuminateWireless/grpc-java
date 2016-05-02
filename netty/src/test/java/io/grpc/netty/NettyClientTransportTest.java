@@ -32,9 +32,12 @@
 package io.grpc.netty;
 
 import static com.google.common.base.Charsets.UTF_8;
-import static io.grpc.internal.HttpUtil.USER_AGENT_KEY;
+import static io.grpc.Status.Code.INTERNAL;
+import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
+import static io.grpc.internal.GrpcUtil.USER_AGENT_KEY;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_WINDOW_SIZE;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import com.google.common.io.ByteStreams;
@@ -48,7 +51,7 @@ import io.grpc.StatusException;
 import io.grpc.internal.ClientStream;
 import io.grpc.internal.ClientStreamListener;
 import io.grpc.internal.ClientTransport;
-import io.grpc.internal.HttpUtil;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.ServerListener;
 import io.grpc.internal.ServerStream;
 import io.grpc.internal.ServerStreamListener;
@@ -93,6 +96,7 @@ public class NettyClientTransportTest {
   private final List<NettyClientTransport> transports = new ArrayList<NettyClientTransport>();
   private NioEventLoopGroup group;
   private InetSocketAddress address;
+  private String authority;
   private NettyServer server;
   private EchoServerListener serverListener = new EchoServerListener();
 
@@ -102,6 +106,7 @@ public class NettyClientTransportTest {
 
     group = new NioEventLoopGroup(1);
     address = TestUtils.testServerAddress(TestUtils.pickUnusedPort());
+    authority = GrpcUtil.authorityFromHostAndPort(address.getHostString(), address.getPort());
   }
 
   @After
@@ -129,8 +134,8 @@ public class NettyClientTransportTest {
     // Verify that the received headers contained the User-Agent.
     assertEquals(1, serverListener.streamListeners.size());
 
-    Metadata.Headers headers = serverListener.streamListeners.get(0).headers;
-    assertEquals(HttpUtil.getGrpcUserAgent("netty", null), headers.get(USER_AGENT_KEY));
+    Metadata headers = serverListener.streamListeners.get(0).headers;
+    assertEquals(GrpcUtil.getGrpcUserAgent("netty", null), headers.get(USER_AGENT_KEY));
   }
 
   @Test
@@ -141,15 +146,34 @@ public class NettyClientTransportTest {
 
     // Send a single RPC and wait for the response.
     String userAgent = "testUserAgent";
-    Metadata.Headers sentHeaders = new Metadata.Headers();
+    Metadata sentHeaders = new Metadata();
     sentHeaders.put(USER_AGENT_KEY, userAgent);
     new Rpc(transport, sentHeaders).halfClose().waitForResponse();
 
     // Verify that the received headers contained the User-Agent.
     assertEquals(1, serverListener.streamListeners.size());
-    Metadata.Headers receivedHeaders = serverListener.streamListeners.get(0).headers;
-    assertEquals(HttpUtil.getGrpcUserAgent("netty", userAgent),
+    Metadata receivedHeaders = serverListener.streamListeners.get(0).headers;
+    assertEquals(GrpcUtil.getGrpcUserAgent("netty", userAgent),
             receivedHeaders.get(USER_AGENT_KEY));
+  }
+
+  @Test
+  public void maxMessageSizeShouldBeEnforced() throws Throwable {
+    startServer();
+    // Allow the response payloads of up to 1 byte.
+    NettyClientTransport transport = newTransport(newNegotiator(), 1);
+    transport.start(clientTransportListener);
+
+    try {
+      // Send a single RPC and wait for the response.
+      new Rpc(transport).halfClose().waitForResponse();
+      fail("Expected the stream to fail.");
+    } catch (ExecutionException e) {
+      Status status = Status.fromThrowable(e);
+      assertEquals(INTERNAL, status.getCode());
+      System.err.println(status.getDescription());
+      assertTrue(status.getDescription().contains("deframing"));
+    }
   }
 
   /**
@@ -214,12 +238,16 @@ public class NettyClientTransportTest {
     File clientCert = TestUtils.loadCert("ca.pem");
     SslContext clientContext = GrpcSslContexts.forClient().trustManager(clientCert)
         .ciphers(TestUtils.preferredTestCiphers(), SupportedCipherSuiteFilter.INSTANCE).build();
-    return ProtocolNegotiators.tls(clientContext, address);
+    return ProtocolNegotiators.tls(clientContext, authority);
   }
 
   private NettyClientTransport newTransport(ProtocolNegotiator negotiator) {
+    return newTransport(negotiator, DEFAULT_MAX_MESSAGE_SIZE);
+  }
+
+  private NettyClientTransport newTransport(ProtocolNegotiator negotiator, int maxMsgSize) {
     NettyClientTransport transport = new NettyClientTransport(address, NioSocketChannel.class,
-            group, negotiator, DEFAULT_WINDOW_SIZE);
+            group, negotiator, DEFAULT_WINDOW_SIZE, maxMsgSize, authority);
     transports.add(transport);
     return transport;
   }
@@ -235,7 +263,7 @@ public class NettyClientTransportTest {
         .ciphers(TestUtils.preferredTestCiphers(), SupportedCipherSuiteFilter.INSTANCE).build();
     server = new NettyServer(address, NioServerSocketChannel.class,
             group, group, serverContext, maxStreamsPerConnection,
-            DEFAULT_WINDOW_SIZE);
+            DEFAULT_WINDOW_SIZE, DEFAULT_MAX_MESSAGE_SIZE);
     server.start(serverListener);
   }
 
@@ -249,10 +277,10 @@ public class NettyClientTransportTest {
     final TestClientStreamListener listener = new TestClientStreamListener();
 
     Rpc(NettyClientTransport transport) {
-      this(transport, new Metadata.Headers());
+      this(transport, new Metadata());
     }
 
-    Rpc(NettyClientTransport transport, Metadata.Headers headers) {
+    Rpc(NettyClientTransport transport, Metadata headers) {
       stream = transport.newStream(METHOD, headers, listener);
       stream.request(1);
       stream.writeMessage(new ByteArrayInputStream(MESSAGE.getBytes()));
@@ -278,7 +306,7 @@ public class NettyClientTransportTest {
     private final SettableFuture<Void> responseFuture = SettableFuture.create();
 
     @Override
-    public void headersRead(Metadata.Headers headers) {
+    public void headersRead(Metadata headers) {
     }
 
     @Override
@@ -305,12 +333,13 @@ public class NettyClientTransportTest {
   private static final class EchoServerStreamListener implements ServerStreamListener {
     final ServerStream stream;
     final String method;
-    final Metadata.Headers headers;
+    final Metadata headers;
 
-    EchoServerStreamListener(ServerStream stream, String method, Metadata.Headers headers) {
+    EchoServerStreamListener(ServerStream stream, String method, Metadata headers) {
       this.stream = stream;
       this.method = method;
       this.headers = headers;
+      stream.writeHeaders(new Metadata());
       stream.request(1);
     }
 
@@ -348,7 +377,7 @@ public class NettyClientTransportTest {
 
         @Override
         public ServerStreamListener streamCreated(final ServerStream stream, String method,
-                                                  Metadata.Headers headers) {
+                                                  Metadata headers) {
           EchoServerStreamListener listener = new EchoServerStreamListener(stream, method, headers);
           streamListeners.add(listener);
           return listener;

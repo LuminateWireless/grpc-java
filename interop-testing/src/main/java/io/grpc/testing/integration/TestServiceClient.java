@@ -33,7 +33,8 @@ package io.grpc.testing.integration;
 
 import com.google.common.io.Files;
 
-import io.grpc.ChannelImpl;
+import io.grpc.ManagedChannel;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NegotiationType;
 import io.grpc.netty.NettyChannelBuilder;
@@ -167,7 +168,9 @@ public class TestServiceClient {
           + "\n      empty_stream: A stream that has zero-messages in both directions"
           + "\n      service_account_creds: large_unary with service_account auth"
           + "\n      compute_engine_creds: large_unary with compute engine auth"
+          + "\n      jwt_token_creds: JWT-based auth"
           + "\n      oauth2_auth_token: raw oauth2 access token auth"
+          + "\n      per_rpc_creds: per rpc raw oauth2 access token auth"
           + "\n      cancel_after_begin: cancel stream after starting it"
           + "\n      cancel_after_first_response: cancel on first response"
           + "\n  --use_tls=true|false        Whether to use TLS. Default " + c.useTls
@@ -229,10 +232,17 @@ public class TestServiceClient {
       String jsonKey = Files.toString(new File(serviceAccountKeyFile), Charset.forName("UTF-8"));
       FileInputStream credentialsStream = new FileInputStream(new File(serviceAccountKeyFile));
       tester.serviceAccountCreds(jsonKey, credentialsStream, oauthScope);
+    } else if ("jwt_token_creds".equals(testCase)) {
+      FileInputStream credentialsStream = new FileInputStream(new File(serviceAccountKeyFile));
+      tester.jwtTokenCreds(credentialsStream);
     } else if ("oauth2_auth_token".equals(testCase)) {
       String jsonKey = Files.toString(new File(serviceAccountKeyFile), Charset.forName("UTF-8"));
       FileInputStream credentialsStream = new FileInputStream(new File(serviceAccountKeyFile));
       tester.oauth2AuthToken(jsonKey, credentialsStream, oauthScope);
+    } else if ("per_rpc_creds".equals(testCase)) {
+      String jsonKey = Files.toString(new File(serviceAccountKeyFile), Charset.forName("UTF-8"));
+      FileInputStream credentialsStream = new FileInputStream(new File(serviceAccountKeyFile));
+      tester.perRpcCreds(jsonKey, credentialsStream, oauthScope);
     } else if ("cancel_after_begin".equals(testCase)) {
       tester.cancelAfterBegin();
     } else if ("cancel_after_first_response".equals(testCase)) {
@@ -244,7 +254,7 @@ public class TestServiceClient {
 
   private class Tester extends AbstractTransportTest {
     @Override
-    protected ChannelImpl createChannel() {
+    protected ManagedChannel createChannel() {
       if (!useOkHttp) {
         InetAddress address;
         try {
@@ -274,7 +284,8 @@ public class TestServiceClient {
         OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress(serverHost, serverPort);
         if (serverHostOverride != null) {
           // Force the hostname to match the cert the server uses.
-          builder.overrideHostForAuthority(serverHostOverride);
+          builder.overrideAuthority(
+              GrpcUtil.authorityFromHostAndPort(serverHostOverride, serverPort));
         }
         if (useTls) {
           try {

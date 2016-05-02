@@ -58,8 +58,8 @@ import io.grpc.Status;
 import io.grpc.Status.Code;
 import io.grpc.internal.ClientStreamListener;
 import io.grpc.internal.ClientTransport;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.Http2Ping;
-import io.grpc.internal.HttpUtil;
 import io.grpc.internal.SerializingExecutor;
 
 import okio.Buffer;
@@ -70,6 +70,7 @@ import okio.Okio;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.net.URI;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -124,7 +125,6 @@ class OkHttpClientTransport implements ClientTransport {
 
   private final String host;
   private final int port;
-  private final String authorityHost;
   private final String defaultAuthority;
   private final Random random = new Random();
   private final Ticker ticker;
@@ -141,6 +141,7 @@ class OkHttpClientTransport implements ClientTransport {
   private final Executor executor;
   // Wrap on executor, to guarantee some operations be executed serially.
   private final SerializingExecutor serializingExecutor;
+  private final int maxMessageSize;
   private int connectionUnacknowledgedBytesRead;
   private ClientFrameHandler clientFrameHandler;
   // The status used to finish all active streams when the transport is closed.
@@ -165,19 +166,21 @@ class OkHttpClientTransport implements ClientTransport {
   Runnable connectingCallback;
   SettableFuture<Void> connectedFuture;
 
-  OkHttpClientTransport(String host, int port, String authorityHost, Executor executor,
-      @Nullable SSLSocketFactory sslSocketFactory, ConnectionSpec connectionSpec) {
-    this.host = Preconditions.checkNotNull(host);
+  OkHttpClientTransport(String host, int port, String authority, Executor executor,
+
+      @Nullable SSLSocketFactory sslSocketFactory, ConnectionSpec connectionSpec,
+      int maxMessageSize) {
+    this.host = Preconditions.checkNotNull(host, "host");
     this.port = port;
-    this.authorityHost = authorityHost;
-    defaultAuthority = authorityHost + ":" + port;
-    this.executor = Preconditions.checkNotNull(executor);
+    this.defaultAuthority = authority;
+    this.maxMessageSize = maxMessageSize;
+    this.executor = Preconditions.checkNotNull(executor, "executor");
     serializingExecutor = new SerializingExecutor(executor);
     // Client initiated streams are odd, server initiated ones are even. Server should not need to
     // use it. We start clients at 3 to avoid conflicting with HTTP negotiation.
     nextStreamId = 3;
     this.sslSocketFactory = sslSocketFactory;
-    this.connectionSpec = Preconditions.checkNotNull(connectionSpec);
+    this.connectionSpec = Preconditions.checkNotNull(connectionSpec, "connectionSpec");
     this.ticker = Ticker.systemTicker();
   }
 
@@ -187,10 +190,11 @@ class OkHttpClientTransport implements ClientTransport {
   @VisibleForTesting
   OkHttpClientTransport(Executor executor, FrameReader frameReader, FrameWriter testFrameWriter,
       int nextStreamId, Socket socket, Ticker ticker,
-      @Nullable Runnable connectingCallback, SettableFuture<Void> connectedFuture) {
+      @Nullable Runnable connectingCallback, SettableFuture<Void> connectedFuture,
+      int maxMessageSize) {
     host = null;
     port = 0;
-    authorityHost = null;
+    this.maxMessageSize = maxMessageSize;
     defaultAuthority = "notarealauthority:80";
     this.executor = Preconditions.checkNotNull(executor);
     serializingExecutor = new SerializingExecutor(executor);
@@ -241,16 +245,17 @@ class OkHttpClientTransport implements ClientTransport {
 
   @Override
   public OkHttpClientStream newStream(MethodDescriptor<?, ?> method,
-                                      Metadata.Headers headers,
+                                      Metadata headers,
                                       ClientStreamListener listener) {
     Preconditions.checkNotNull(method, "method");
     Preconditions.checkNotNull(headers, "headers");
     Preconditions.checkNotNull(listener, "listener");
 
     String defaultPath = "/" + method.getFullMethodName();
-    OkHttpClientStream clientStream = OkHttpClientStream.newStream(
+    OkHttpClientStream clientStream = new OkHttpClientStream(
         listener, frameWriter, this, outboundFlow, method.getType(), lock,
-        Headers.createRequestHeaders(headers, defaultPath, defaultAuthority));
+        Headers.createRequestHeaders(headers, defaultPath, defaultAuthority),
+        maxMessageSize);
 
     synchronized (lock) {
       if (goAway) {
@@ -344,14 +349,19 @@ class OkHttpClientTransport implements ClientTransport {
         try {
           sock = new Socket(host, port);
           if (sslSocketFactory != null) {
+            URI uri = GrpcUtil.authorityToUri(defaultAuthority);
             sock = OkHttpTlsUpgrader.upgrade(
-                sslSocketFactory, sock, authorityHost, port, connectionSpec);
+                sslSocketFactory, sock, uri.getHost(), uri.getPort(), connectionSpec);
           }
           sock.setTcpNoDelay(true);
           source = Okio.buffer(Okio.source(sock));
           sink = Okio.buffer(Okio.sink(sock));
-        } catch (IOException e) {
-          onIoException(e);
+        } catch (RuntimeException e) {
+          onException(e);
+          throw e;
+        } catch (Exception e) {
+          onException(e);
+
           // (and probably do all of this work asynchronously instead of in calling thread)
           throw new RuntimeException(e);
         }
@@ -381,15 +391,15 @@ class OkHttpClientTransport implements ClientTransport {
           rawFrameWriter.connectionPreface();
           Settings settings = new Settings();
           rawFrameWriter.settings(settings);
-        } catch (IOException e) {
-          onIoException(e);
+        } catch (RuntimeException e) {
+          onException(e);
+          throw e;
+        } catch (Exception e) {
+          onException(e);
           throw new RuntimeException(e);
         }
 
         clientFrameHandler = new ClientFrameHandler(variant.newReader(source, true));
-        synchronized (lock) {
-          OkHttpClientTransport.this.listener.transportReady();
-        }
         executor.execute(clientFrameHandler);
         startPendingStreams();
       }
@@ -435,7 +445,7 @@ class OkHttpClientTransport implements ClientTransport {
   /**
    * Finish all active streams due to an IOException, then close the transport.
    */
-  void onIoException(IOException failureCause) {
+  void onException(Throwable failureCause) {
     log.log(Level.SEVERE, "Transport failed", failureCause);
     onGoAway(0, Status.UNAVAILABLE.withCause(failureCause));
   }
@@ -569,6 +579,7 @@ class OkHttpClientTransport implements ClientTransport {
   @VisibleForTesting
   class ClientFrameHandler implements FrameReader.Handler, Runnable {
     FrameReader frameReader;
+    boolean firstSettings = true;
 
     ClientFrameHandler(FrameReader frameReader) {
       this.frameReader = frameReader;
@@ -582,10 +593,10 @@ class OkHttpClientTransport implements ClientTransport {
         // Read until the underlying socket closes.
         while (frameReader.nextFrame(this)) {
         }
-      } catch (IOException ioe) {
-        // We call onError instead of onIoException here, because OkHttp wraps many protocol errors
-        // as IOException, we should send GoAway for such errors.
-        onError(ErrorCode.PROTOCOL_ERROR, ioe.getMessage());
+      } catch (Exception t) {
+        // TODO(madongfly): Send the exception message to the server.
+        frameWriter.goAway(0, ErrorCode.PROTOCOL_ERROR, new byte[0]);
+        onException(t);
       } finally {
         try {
           frameReader.close();
@@ -608,6 +619,7 @@ class OkHttpClientTransport implements ClientTransport {
       if (stream == null) {
         if (mayHaveCreatedStream(streamId)) {
           frameWriter.rstStream(streamId, ErrorCode.INVALID_STREAM);
+          in.skip(length);
         } else {
           onError(ErrorCode.PROTOCOL_ERROR, "Received data for unknown stream: " + streamId);
           return;
@@ -667,19 +679,21 @@ class OkHttpClientTransport implements ClientTransport {
 
     @Override
     public void settings(boolean clearPrevious, Settings settings) {
-      if (OkHttpSettingsUtil.isSet(settings, OkHttpSettingsUtil.MAX_CONCURRENT_STREAMS)) {
-        int receivedMaxConcurrentStreams = OkHttpSettingsUtil.get(
-            settings, OkHttpSettingsUtil.MAX_CONCURRENT_STREAMS);
-        synchronized (lock) {
+      synchronized (lock) {
+        if (OkHttpSettingsUtil.isSet(settings, OkHttpSettingsUtil.MAX_CONCURRENT_STREAMS)) {
+          int receivedMaxConcurrentStreams = OkHttpSettingsUtil.get(
+              settings, OkHttpSettingsUtil.MAX_CONCURRENT_STREAMS);
           maxConcurrentStreams = receivedMaxConcurrentStreams;
         }
-      }
 
-      if (OkHttpSettingsUtil.isSet(settings, OkHttpSettingsUtil.INITIAL_WINDOW_SIZE)) {
-        int initialWindowSize = OkHttpSettingsUtil.get(
-            settings, OkHttpSettingsUtil.INITIAL_WINDOW_SIZE);
-        synchronized (lock) {
+        if (OkHttpSettingsUtil.isSet(settings, OkHttpSettingsUtil.INITIAL_WINDOW_SIZE)) {
+          int initialWindowSize = OkHttpSettingsUtil.get(
+              settings, OkHttpSettingsUtil.INITIAL_WINDOW_SIZE);
           outboundFlow.initialOutboundWindowSize(initialWindowSize);
+        }
+        if (firstSettings) {
+          listener.transportReady();
+          firstSettings = false;
         }
       }
 
@@ -720,7 +734,7 @@ class OkHttpClientTransport implements ClientTransport {
 
     @Override
     public void goAway(int lastGoodStreamId, ErrorCode errorCode, ByteString debugData) {
-      Status status = HttpUtil.Http2Error.statusForCode(errorCode.httpCode);
+      Status status = GrpcUtil.Http2Error.statusForCode(errorCode.httpCode);
       if (debugData != null && debugData.size() > 0) {
         // If a debug message was provided, use it.
         status.augmentDescription(debugData.utf8());
@@ -779,5 +793,10 @@ class OkHttpClientTransport implements ClientTransport {
         int port, long maxAge) {
       // TODO(madongfly): Deal with alternateService propagation
     }
+  }
+  
+  @Override
+  public String remoteAddress() {
+    return host + ":" + port;
   }
 }

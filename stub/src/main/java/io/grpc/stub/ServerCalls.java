@@ -31,6 +31,7 @@
 
 package io.grpc.stub;
 
+import io.grpc.ExperimentalApi;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
@@ -41,6 +42,7 @@ import io.grpc.Status;
  * Utility functions for adapting {@link ServerCallHandler}s to application service implementation,
  * meant to be used by the generated code.
  */
+@ExperimentalApi
 public class ServerCalls {
 
   private ServerCalls() {
@@ -125,7 +127,7 @@ public class ServerCalls {
       public ServerCall.Listener<ReqT> startCall(
           MethodDescriptor<ReqT, RespT> methodDescriptor,
           final ServerCall<RespT> call,
-          Metadata.Headers headers) {
+          Metadata headers) {
         final ResponseObserver<RespT> responseObserver = new ResponseObserver<RespT>(call);
         // We expect only 1 request, but we ask for 2 requests here so that if a misbehaving client
         // sends more than 1 requests, we will catch it in onMessage() and emit INVALID_ARGUMENT.
@@ -177,7 +179,7 @@ public class ServerCalls {
       public ServerCall.Listener<ReqT> startCall(
           MethodDescriptor<ReqT, RespT> methodDescriptor,
           final ServerCall<RespT> call,
-          Metadata.Headers headers) {
+          Metadata headers) {
         call.request(1);
         final ResponseObserver<RespT> responseObserver = new ResponseObserver<RespT>(call);
         final StreamObserver<ReqT> requestObserver = method.invoke(responseObserver);
@@ -186,7 +188,7 @@ public class ServerCalls {
 
           @Override
           public void onMessage(ReqT request) {
-            requestObserver.onValue(request);
+            requestObserver.onNext(request);
 
             // Request delivery of the next inbound message.
             call.request(1);
@@ -221,20 +223,22 @@ public class ServerCalls {
   private static class ResponseObserver<RespT> implements StreamObserver<RespT> {
     final ServerCall<RespT> call;
     volatile boolean cancelled;
+    private boolean sentHeaders;
 
     ResponseObserver(ServerCall<RespT> call) {
       this.call = call;
     }
 
     @Override
-    public void onValue(RespT response) {
+    public void onNext(RespT response) {
       if (cancelled) {
         throw Status.CANCELLED.asRuntimeException();
       }
+      if (!sentHeaders) {
+        call.sendHeaders(new Metadata());
+        sentHeaders = true;
+      }
       call.sendMessage(response);
-
-      // Request delivery of the next inbound message.
-      call.request(1);
     }
 
     @Override

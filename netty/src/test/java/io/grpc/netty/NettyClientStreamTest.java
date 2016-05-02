@@ -31,6 +31,7 @@
 
 package io.grpc.netty;
 
+import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 import static io.grpc.netty.NettyTestUtil.messageFrame;
 import static io.grpc.netty.Utils.CONTENT_TYPE_GRPC;
 import static io.grpc.netty.Utils.CONTENT_TYPE_HEADER;
@@ -54,12 +55,14 @@ import static org.mockito.Mockito.when;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.internal.ClientStreamListener;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.util.AsciiString;
+import io.netty.util.ByteString;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -77,7 +80,7 @@ import java.io.InputStream;
  * Tests for {@link NettyClientStream}.
  */
 @RunWith(JUnit4.class)
-public class NettyClientStreamTest extends NettyStreamTestBase {
+public class NettyClientStreamTest extends NettyStreamTestBase<NettyClientStream> {
   @Mock
   protected ClientStreamListener listener;
 
@@ -148,9 +151,9 @@ public class NettyClientStreamTest extends NettyStreamTestBase {
     stream.flush();
     // Two writes occur, one for the GRPC frame header and the second with the payload
     verify(writeQueue).enqueue(
-        eq(new SendGrpcFrameCommand(stream, messageFrame(MESSAGE).slice(0, 5), false)),
-        any(ChannelPromise.class),
-        eq(false));
+            eq(new SendGrpcFrameCommand(stream, messageFrame(MESSAGE).slice(0, 5), false)),
+            any(ChannelPromise.class),
+            eq(false));
     verify(writeQueue).enqueue(
         eq(new SendGrpcFrameCommand(stream, messageFrame(MESSAGE).slice(5, 11), false)),
         any(ChannelPromise.class),
@@ -206,7 +209,7 @@ public class NettyClientStreamTest extends NettyStreamTestBase {
     stream().id(STREAM_ID);
     Http2Headers headers = grpcResponseHeaders();
     stream().transportHeadersReceived(headers, false);
-    verify(listener).headersRead(any(Metadata.Headers.class));
+    verify(listener).headersRead(any(Metadata.class));
   }
 
   @Test
@@ -255,6 +258,25 @@ public class NettyClientStreamTest extends NettyStreamTestBase {
     assertEquals(Status.UNKNOWN.getCode(), captor.getValue().getCode());
     assertTrue(stream.isClosed());
 
+  }
+
+  @Test
+  public void invalidInboundContentTypeShouldBeIgnored/*CancelStream*/() {
+    // Set stream id to indicate it has been created
+    stream().id(STREAM_ID);
+    Http2Headers headers = new DefaultHttp2Headers().status(STATUS_OK).set(CONTENT_TYPE_HEADER,
+            new ByteString("application/bad", UTF_8));
+    stream().transportHeadersReceived(headers, false);
+    Http2Headers trailers = new DefaultHttp2Headers()
+        .set(new ByteString("grpc-status", UTF_8), new ByteString("0", UTF_8));
+    stream().transportHeadersReceived(trailers, true);
+    ArgumentCaptor<Status> captor = ArgumentCaptor.forClass(Status.class);
+    verify(listener).closed(captor.capture(), any(Metadata.class));
+    Status status = captor.getValue();
+    // Temporarily consider this OK, for compatibility with C-based servers
+    //assertEquals(status.getCode(), Status.Code.INTERNAL);
+    assertEquals(status.getCode(), Status.Code.OK);
+    //assertTrue(status.getDescription().contains("content-type"));
   }
 
   @Test
@@ -321,7 +343,7 @@ public class NettyClientStreamTest extends NettyStreamTestBase {
   @Test
   public void setHttp2StreamShouldNotifyReady() {
     listener = mock(ClientStreamListener.class);
-    stream = new NettyClientStream(listener, channel, handler);
+    stream = new NettyClientStream(listener, channel, handler, DEFAULT_MAX_MESSAGE_SIZE);
     stream().id(STREAM_ID);
     verify(listener, never()).onReady();
     assertFalse(stream.isReady());
@@ -343,7 +365,8 @@ public class NettyClientStreamTest extends NettyStreamTestBase {
       }
     }).when(writeQueue).enqueue(any(), any(ChannelPromise.class), anyBoolean());
     when(writeQueue.enqueue(any(), anyBoolean())).thenReturn(future);
-    NettyClientStream stream = new NettyClientStream(listener, channel, handler);
+    NettyClientStream stream = new NettyClientStream(listener, channel, handler,
+            DEFAULT_MAX_MESSAGE_SIZE);
     assertTrue(stream.canSend());
     assertTrue(stream.canReceive());
     stream.id(STREAM_ID);
@@ -351,6 +374,9 @@ public class NettyClientStreamTest extends NettyStreamTestBase {
     reset(listener);
     return stream;
   }
+
+  @Override
+  protected void sendHeadersIfServer() {}
 
   @Override
   protected void closeStream() {

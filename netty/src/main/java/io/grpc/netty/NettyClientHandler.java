@@ -41,9 +41,10 @@ import com.google.common.base.Ticker;
 
 import io.grpc.Metadata;
 import io.grpc.Status;
+import io.grpc.StatusException;
 import io.grpc.internal.ClientTransport.PingCallback;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.Http2Ping;
-import io.grpc.internal.HttpUtil;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -77,11 +78,18 @@ import javax.annotation.Nullable;
  */
 class NettyClientHandler extends Http2ConnectionHandler {
   private static final Logger logger = Logger.getLogger(NettyClientHandler.class.getName());
+
   /**
    * A message that simply passes through the channel without any real processing. It is useful to
    * check if buffers have been drained and test the health of the channel in a single operation.
    */
   static final Object NOOP_MESSAGE = new Object();
+
+  /**
+   * Status used when the transport has exhausted the number of streams.
+   */
+  private static final Status EXHAUSTED_STREAMS_STATUS =
+          Status.UNAVAILABLE.withDescription("Stream IDs have been exhausted");
 
   private final Http2Connection.PropertyKey streamKey;
   private final Ticker ticker;
@@ -155,7 +163,8 @@ class NettyClientHandler extends Http2ConnectionHandler {
    * Handler for commands sent from the stream.
    */
   @Override
-  public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+  public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
+          throws Exception {
     if (msg instanceof CreateStreamCommand) {
       createStream((CreateStreamCommand) msg, promise);
     } else if (msg instanceof SendGrpcFrameCommand) {
@@ -186,7 +195,7 @@ class NettyClientHandler extends Http2ConnectionHandler {
    */
   void returnProcessedBytes(Http2Stream stream, int bytes) {
     try {
-      decoder().flowController().consumeBytes(ctx, stream, bytes);
+      decoder().flowController().consumeBytes(stream, bytes);
     } catch (Http2Exception e) {
       throw new RuntimeException(e);
     }
@@ -215,8 +224,8 @@ class NettyClientHandler extends Http2ConnectionHandler {
    */
   private void onRstStreamRead(int streamId, long errorCode) throws Http2Exception {
     NettyClientStream stream = clientStream(requireHttp2Stream(streamId));
-    Status status = HttpUtil.Http2Error.statusForCode((int) errorCode);
-    stream.transportReportStatus(status, false, new Metadata());
+    Status status = GrpcUtil.Http2Error.statusForCode((int) errorCode);
+    stream.transportReportStatus(status, false /*stop delivery*/, new Metadata());
   }
 
   @Override
@@ -263,7 +272,7 @@ class NettyClientHandler extends Http2ConnectionHandler {
   protected void onConnectionError(ChannelHandlerContext ctx, Throwable cause,
       Http2Exception http2Ex) {
     logger.log(Level.FINE, "Caught a connection error", cause);
-    goAwayStatus(Status.fromThrowable(cause));
+    goAwayStatus(statusFromError(cause));
     super.onConnectionError(ctx, cause, http2Ex);
   }
 
@@ -273,12 +282,16 @@ class NettyClientHandler extends Http2ConnectionHandler {
     // Close the stream with a status that contains the cause.
     Http2Stream stream = connection().stream(http2Ex.streamId());
     if (stream != null) {
-      clientStream(stream).transportReportStatus(Status.fromThrowable(cause), false,
-              new Metadata());
+      clientStream(stream).transportReportStatus(statusFromError(cause), false, new Metadata());
     }
 
     // Delegate to the base class to send a RST_STREAM.
     super.onStreamError(ctx, cause, http2Ex);
+  }
+
+  private Status statusFromError(Throwable cause) {
+    return cause instanceof Http2Exception ? Status.INTERNAL.withCause(cause)
+        : Status.fromThrowable(cause);
   }
 
   @Override
@@ -292,11 +305,27 @@ class NettyClientHandler extends Http2ConnectionHandler {
    * Attempts to create a new stream from the given command. If there are too many active streams,
    * the creation request is queued.
    */
-  private void createStream(CreateStreamCommand command, final ChannelPromise promise) {
-    final int streamId = getAndIncrementNextStreamId();
+  private void createStream(CreateStreamCommand command, final ChannelPromise promise)
+          throws Exception {
+    // Get the stream ID for the new stream.
+    final int streamId;
+    try {
+      streamId = getAndIncrementNextStreamId();
+    } catch (StatusException e) {
+      // Stream IDs have been exhausted for this connection. Fail the promise immediately.
+      promise.setFailure(e);
+
+      // Initiate a graceful shutdown if we haven't already.
+      if (!connection().goAwaySent()) {
+        logger.fine("Stream IDs have been exhausted for this connection. "
+                + "Initiating graceful shutdown of the connection.");
+        super.close(ctx, ctx.newPromise());
+      }
+      return;
+    }
+
     final NettyClientStream stream = command.stream();
     final Http2Headers headers = command.headers();
-    // TODO: Send GO_AWAY if streamId overflows
     stream.id(streamId);
     encoder().writeHeaders(ctx, streamId, headers, 0, false, promise)
             .addListener(new ChannelFutureListener() {
@@ -435,7 +464,7 @@ class NettyClientHandler extends Http2ConnectionHandler {
   }
 
   private Status statusFromGoAway(long errorCode, ByteBuf debugData) {
-    Status status = HttpUtil.Http2Error.statusForCode((int) errorCode);
+    Status status = GrpcUtil.Http2Error.statusForCode((int) errorCode);
     if (debugData.isReadable()) {
       // If a debug message was provided, use it.
       String msg = debugData.toString(UTF_8);
@@ -451,7 +480,13 @@ class NettyClientHandler extends Http2ConnectionHandler {
     return stream.getProperty(streamKey);
   }
 
-  private int getAndIncrementNextStreamId() {
+  private int getAndIncrementNextStreamId() throws StatusException {
+    if (nextStreamId < 0) {
+      logger.fine("Stream IDs have been exhausted for this connection. "
+              + "Initiating graceful shutdown of the connection.");
+      throw EXHAUSTED_STREAMS_STATUS.asException();
+    }
+
     int id = nextStreamId;
     nextStreamId += 2;
     return id;
@@ -488,7 +523,7 @@ class NettyClientHandler extends Http2ConnectionHandler {
       Http2Stream connectionStream = connection().connectionStream();
       int currentSize = connection().local().flowController().windowSize(connectionStream);
       int delta = flowControlWindow - currentSize;
-      decoder().flowController().incrementWindowSize(ctx, connectionStream, delta);
+      decoder().flowController().incrementWindowSize(connectionStream, delta);
       flowControlWindow = -1;
     }
 

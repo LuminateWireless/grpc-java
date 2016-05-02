@@ -31,12 +31,12 @@
 
 package io.grpc.examples.header;
 
-import io.grpc.ServerImpl;
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
 import io.grpc.ServerInterceptors;
 import io.grpc.examples.helloworld.GreeterGrpc;
 import io.grpc.examples.helloworld.HelloRequest;
 import io.grpc.examples.helloworld.HelloResponse;
-import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 
 import java.util.logging.Logger;
@@ -50,12 +50,14 @@ public class CustomHeaderServer {
 
   /* The port on which the server should run */
   private static final int port = 50051;
-  private ServerImpl server;
+  private Server server;
 
   private void start() throws Exception {
-    server = NettyServerBuilder.forPort(port).addService(ServerInterceptors
-            .intercept(GreeterGrpc.bindService(new GreeterImpl()), new HeaderServerInterceptor()))
-            .build().start();
+    server = ServerBuilder.forPort(port)
+        .addService(ServerInterceptors.intercept(
+            GreeterGrpc.bindService(new GreeterImpl()), new HeaderServerInterceptor()))
+        .build()
+        .start();
     logger.info("Server started, listening on " + port);
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
@@ -75,11 +77,21 @@ public class CustomHeaderServer {
   }
 
   /**
+   * Await termination on the main thread since the grpc library uses daemon threads.
+   */
+  private void blockUntilShutdown() throws InterruptedException {
+    if (server != null) {
+      server.awaitTermination();
+    }
+  }
+
+  /**
    * Main launches the server from the command line.
    */
   public static void main(String[] args) throws Exception {
     final CustomHeaderServer server = new CustomHeaderServer();
     server.start();
+    server.blockUntilShutdown();
   }
 
   private class GreeterImpl implements GreeterGrpc.Greeter {
@@ -87,7 +99,7 @@ public class CustomHeaderServer {
     @Override
     public void sayHello(HelloRequest req, StreamObserver<HelloResponse> responseObserver) {
       HelloResponse reply = HelloResponse.newBuilder().setMessage("Hello " + req.getName()).build();
-      responseObserver.onValue(reply);
+      responseObserver.onNext(reply);
       responseObserver.onCompleted();
     }
   }

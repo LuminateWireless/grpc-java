@@ -35,6 +35,8 @@ import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.ClientInterceptor;
 import io.grpc.ClientInterceptors;
+import io.grpc.Compressor;
+import io.grpc.ExperimentalApi;
 
 import java.util.concurrent.TimeUnit;
 
@@ -48,9 +50,9 @@ import javax.annotation.Nullable;
  *
  * @param <S> the concrete type of this stub.
  */
-public abstract class AbstractStub<S extends AbstractStub<?>> {
-  protected final Channel channel;
-  protected final CallOptions callOptions;
+public abstract class AbstractStub<S extends AbstractStub<S>> {
+  private final Channel channel;
+  private final CallOptions callOptions;
 
   /**
    * Constructor for use by subclasses, with the default {@code CallOptions}.
@@ -75,14 +77,14 @@ public abstract class AbstractStub<S extends AbstractStub<?>> {
   /**
    * The underlying channel of the stub.
    */
-  public Channel getChannel() {
+  public final Channel getChannel() {
     return channel;
   }
 
   /**
    * The {@code CallOptions} of the stub.
    */
-  public CallOptions getCallOptions() {
+  public final CallOptions getCallOptions() {
     return callOptions;
   }
 
@@ -121,6 +123,14 @@ public abstract class AbstractStub<S extends AbstractStub<?>> {
    */
   public final S withChannel(Channel newChannel) {
     return build(newChannel, callOptions);
+  }
+
+  /**
+   * Returns a new stub that uses the given compressor.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/492")
+  public final S withCompressor(Compressor c) {
+    return build(channel, callOptions.withCompressor(c));
   }
 
   /**

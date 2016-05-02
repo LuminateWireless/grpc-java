@@ -31,6 +31,8 @@
 
 package io.grpc;
 
+import com.google.common.base.Objects;
+
 import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Nullable;
@@ -52,6 +54,29 @@ public final class CallOptions {
   // them outside of constructor. Otherwise the constructor will have a potentially long list of
   // unnamed arguments, which is undesirable.
   private Long deadlineNanoTime;
+
+
+  @Nullable
+  private Compressor compressor;
+
+  @Nullable
+  private String authority;
+
+  /**
+   * Override the HTTP/2 authority the channel claims to be connecting to. <em>This is not
+   * generally safe.</em> Overriding allows advanced users to re-use a single Channel for multiple
+   * services, even if those services are hosted on different domain names. That assumes the
+   * server is virtually hosting multiple domains and is guaranteed to continue doing so. It is
+   * rare for a service provider to make such a guarantee. <em>At this time, there is no security
+   * verification of the overridden value, such as making sure the authority matches the server's
+   * TLS certificate.</em>
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/67")
+  public CallOptions withAuthority(@Nullable String authority) {
+    CallOptions newOptions = new CallOptions(this);
+    newOptions.authority = authority;
+    return newOptions;
+  }
 
   /**
    * Returns a new {@code CallOptions} with the given absolute deadline in nanoseconds in the clock
@@ -86,6 +111,40 @@ public final class CallOptions {
     return deadlineNanoTime;
   }
 
+  /**
+   * Returns the compressor, or {@code null} if none is set.
+   */
+  @Nullable
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/492")
+  public Compressor getCompressor() {
+    return compressor;
+  }
+
+  /**
+   * Use the desired compression.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/492")
+  public CallOptions withCompressor(@Nullable Compressor compressor) {
+    CallOptions newOptions = new CallOptions(this);
+    newOptions.compressor = compressor;
+    return newOptions;
+  }
+
+  /**
+   * Override the HTTP/2 authority the channel claims to be connecting to. <em>This is not
+   * generally safe.</em> Overriding allows advanced users to re-use a single Channel for multiple
+   * services, even if those services are hosted on different domain names. That assumes the
+   * server is virtually hosting multiple domains and is guaranteed to continue doing so. It is
+   * rare for a service provider to make such a guarantee. <em>At this time, there is no security
+   * verification of the overridden value, such as making sure the authority matches the server's
+   * TLS certificate.</em>
+   */
+  @Nullable
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/67")
+  public String getAuthority() {
+    return authority;
+  }
+
   private CallOptions() {
   }
 
@@ -94,16 +153,21 @@ public final class CallOptions {
    */
   private CallOptions(CallOptions other) {
     deadlineNanoTime = other.deadlineNanoTime;
+    compressor = other.compressor;
+    authority = other.authority;
   }
 
+  @SuppressWarnings("deprecation") // guava 14.0
   @Override
   public String toString() {
-    StringBuilder buffer = new StringBuilder();
-    buffer.append("[deadlineNanoTime=").append(deadlineNanoTime);
+    Objects.ToStringHelper toStringHelper = Objects.toStringHelper(this);
+    toStringHelper.add("deadlineNanoTime", deadlineNanoTime);
     if (deadlineNanoTime != null) {
-      buffer.append(" (").append(deadlineNanoTime - System.nanoTime()).append(" ns from now)");
+      long remainingNanos = deadlineNanoTime - System.nanoTime();
+      toStringHelper.addValue(remainingNanos + " ns from now");
     }
-    buffer.append("]");
-    return buffer.toString();
+    toStringHelper.add("compressor", compressor);
+
+    return toStringHelper.toString();
   }
 }

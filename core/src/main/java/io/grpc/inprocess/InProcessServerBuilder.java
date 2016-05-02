@@ -33,8 +33,11 @@ package io.grpc.inprocess;
 
 import com.google.common.base.Preconditions;
 
-import io.grpc.AbstractServerBuilder;
+import io.grpc.ExperimentalApi;
 import io.grpc.HandlerRegistry;
+import io.grpc.internal.AbstractServerImplBuilder;
+
+import java.io.File;
 
 /**
  * Builder for a server that services in-process requests. Clients identify the in-process server by
@@ -42,7 +45,9 @@ import io.grpc.HandlerRegistry;
  *
  * <p>The server is intended to be fully-featured, high performance, and useful in testing.
  */
-public final class InProcessServerBuilder extends AbstractServerBuilder<InProcessServerBuilder> {
+@ExperimentalApi("There is no plan to make this API stable.")
+public final class InProcessServerBuilder
+        extends AbstractServerImplBuilder<InProcessServerBuilder> {
   /**
    * Create a server builder that will bind with the given name.
    *
@@ -76,7 +81,12 @@ public final class InProcessServerBuilder extends AbstractServerBuilder<InProces
   }
 
   @Override
-  protected ServerEssentials buildEssentials() {
-    return new ServerEssentials(new InProcessServer(name), null);
+  protected InProcessServer buildTransportServer() {
+    return new InProcessServer(name);
+  }
+
+  @Override
+  public InProcessServerBuilder useTransportSecurity(File certChain, File privateKey) {
+    throw new UnsupportedOperationException("TLS not supported in InProcessServer");
   }
 }

@@ -31,6 +31,9 @@
 
 package io.grpc.okhttp;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
+
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
@@ -38,32 +41,26 @@ import com.squareup.okhttp.CipherSuite;
 import com.squareup.okhttp.ConnectionSpec;
 import com.squareup.okhttp.TlsVersion;
 
-import io.grpc.AbstractChannelBuilder;
+import io.grpc.ExperimentalApi;
+import io.grpc.internal.AbstractManagedChannelImplBuilder;
+import io.grpc.internal.AbstractReferenceCounted;
+import io.grpc.internal.ClientTransport;
 import io.grpc.internal.ClientTransportFactory;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.SharedResourceHolder;
 import io.grpc.internal.SharedResourceHolder.Resource;
 
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import javax.annotation.Nullable;
 import javax.net.ssl.SSLSocketFactory;
 
 /** Convenience class for building channels with the OkHttp transport. */
-public final class OkHttpChannelBuilder extends AbstractChannelBuilder<OkHttpChannelBuilder> {
-  private static final Resource<ExecutorService> DEFAULT_TRANSPORT_THREAD_POOL =
-      new Resource<ExecutorService>() {
-        @Override
-        public ExecutorService create() {
-          return Executors.newCachedThreadPool(new ThreadFactoryBuilder()
-              .setNameFormat("grpc-okhttp-%d")
-              .build());
-        }
-
-        @Override
-        public void close(ExecutorService executor) {
-          executor.shutdown();
-        }
-      };
+@ExperimentalApi("There is no plan to make this API stable, given transport API instability")
+public final class OkHttpChannelBuilder extends
+        AbstractManagedChannelImplBuilder<OkHttpChannelBuilder> {
 
   public static final ConnectionSpec DEFAULT_CONNECTION_SPEC =
       new ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
@@ -80,24 +77,40 @@ public final class OkHttpChannelBuilder extends AbstractChannelBuilder<OkHttpCha
           .tlsVersions(TlsVersion.TLS_1_2)
           .supportsTlsExtensions(true)
           .build();
+  private static final Resource<ExecutorService> SHARED_EXECUTOR =
+      new Resource<ExecutorService>() {
+        @Override
+        public ExecutorService create() {
+          return Executors.newCachedThreadPool(new ThreadFactoryBuilder()
+                  .setDaemon(true)
+                  .setNameFormat("grpc-okhttp-%d")
+                  .build());
+        }
+
+        @Override
+        public void close(ExecutorService executor) {
+          executor.shutdown();
+        }
+      };
 
   /** Creates a new builder for the given server host and port. */
   public static OkHttpChannelBuilder forAddress(String host, int port) {
     return new OkHttpChannelBuilder(host, port);
   }
 
-  private ExecutorService transportExecutor;
+  private Executor transportExecutor;
   private final String host;
   private final int port;
-  private String authorityHost;
+  private String authority;
   private SSLSocketFactory sslSocketFactory;
   private ConnectionSpec connectionSpec = DEFAULT_CONNECTION_SPEC;
   private NegotiationType negotiationType = NegotiationType.TLS;
+  private int maxMessageSize = DEFAULT_MAX_MESSAGE_SIZE;
 
   private OkHttpChannelBuilder(String host, int port) {
     this.host = Preconditions.checkNotNull(host);
     this.port = port;
-    this.authorityHost = host;
+    this.authority = GrpcUtil.authorityFromHostAndPort(host, port);
   }
 
   /**
@@ -106,19 +119,29 @@ public final class OkHttpChannelBuilder extends AbstractChannelBuilder<OkHttpCha
    * <p>The channel does not take ownership of the given executor. It is the caller' responsibility
    * to shutdown the executor when appropriate.
    */
-  public OkHttpChannelBuilder transportExecutor(ExecutorService executor) {
-    this.transportExecutor = executor;
+  public OkHttpChannelBuilder transportExecutor(@Nullable Executor transportExecutor) {
+    this.transportExecutor = transportExecutor;
     return this;
   }
 
   /**
    * Overrides the host used with TLS and HTTP virtual hosting. It does not change what host is
-   * actually connected to.
+   * actually connected to. This method differs from {@link #overrideAuthority(String)} in that it
+   * appends the port number to the host provided.
    *
    * <p>Should only used by tests.
+   *
+   * @deprecated use {@link #overrideAuthority} instead
    */
+  @Deprecated
   public OkHttpChannelBuilder overrideHostForAuthority(String host) {
-    this.authorityHost = host;
+    this.authority = GrpcUtil.authorityFromHostAndPort(host, this.port);
+    return this;
+  }
+
+  @Override
+  public OkHttpChannelBuilder overrideAuthority(String authority) {
+    this.authority = GrpcUtil.checkAuthority(authority);
     return this;
   }
 
@@ -156,35 +179,97 @@ public final class OkHttpChannelBuilder extends AbstractChannelBuilder<OkHttpCha
     return this;
   }
 
+  /**
+   * Sets the maximum message size allowed to be received on the channel. If not called,
+   * defaults to {@link io.grpc.internal.GrpcUtil#DEFAULT_MAX_MESSAGE_SIZE}.
+   */
+  public OkHttpChannelBuilder maxMessageSize(int maxMessageSize) {
+    checkArgument(maxMessageSize >= 0, "maxMessageSize must be >= 0");
+    this.maxMessageSize = maxMessageSize;
+    return this;
+  }
+
+  /**
+   * Equivalent to using {@link #negotiationType(NegotiationType)} with {@code PLAINTEXT}.
+   */
   @Override
-  protected ChannelEssentials buildEssentials() {
-    final ExecutorService executor = (transportExecutor == null)
-        ? SharedResourceHolder.get(DEFAULT_TRANSPORT_THREAD_POOL) : transportExecutor;
-    SSLSocketFactory socketFactory;
+  public OkHttpChannelBuilder usePlaintext(boolean skipNegotiation) {
+    if (skipNegotiation) {
+      negotiationType(NegotiationType.PLAINTEXT);
+    } else {
+      throw new IllegalArgumentException("Plaintext negotiation not currently supported");
+    }
+    return this;
+  }
+
+  @Override
+  protected ClientTransportFactory buildTransportFactory() {
+    return new OkHttpTransportFactory(host, port, authority, transportExecutor,
+            createSocketFactory(), connectionSpec, maxMessageSize);
+  }
+
+  private SSLSocketFactory createSocketFactory() {
     switch (negotiationType) {
       case TLS:
-        socketFactory = sslSocketFactory == null
-            ? (SSLSocketFactory) SSLSocketFactory.getDefault() : sslSocketFactory;
-        break;
+        return sslSocketFactory == null
+                ? (SSLSocketFactory) SSLSocketFactory.getDefault() : sslSocketFactory;
       case PLAINTEXT:
-        socketFactory = null;
-        break;
+        return null;
       default:
         throw new RuntimeException("Unknown negotiation type: " + negotiationType);
     }
+  }
 
-    ClientTransportFactory transportFactory = new OkHttpClientTransportFactory(
-        host, port, authorityHost, executor, socketFactory, connectionSpec);
-    Runnable terminationRunnable = null;
-    // We shut down the executor only if we created it.
-    if (transportExecutor == null) {
-      terminationRunnable = new Runnable() {
-        @Override
-        public void run() {
-          SharedResourceHolder.release(DEFAULT_TRANSPORT_THREAD_POOL, executor);
-        }
-      };
+  private static class OkHttpTransportFactory extends AbstractReferenceCounted
+          implements ClientTransportFactory {
+    private final String host;
+    private final int port;
+    private final String authority;
+    private final Executor executor;
+    private final boolean usingSharedExecutor;
+    private final SSLSocketFactory socketFactory;
+    private final ConnectionSpec connectionSpec;
+    private final int maxMessageSize;
+
+    private OkHttpTransportFactory(String host,
+                                   int port,
+                                   String authority,
+                                   Executor executor,
+                                   SSLSocketFactory socketFactory,
+                                   ConnectionSpec connectionSpec,
+                                   int maxMessageSize) {
+      this.host = host;
+      this.port = port;
+      this.authority = authority;
+      this.socketFactory = socketFactory;
+      this.connectionSpec = connectionSpec;
+      this.maxMessageSize = maxMessageSize;
+
+      usingSharedExecutor = executor == null;
+      if (usingSharedExecutor) {
+        // The executor was unspecified, using the shared executor.
+        this.executor = SharedResourceHolder.get(SHARED_EXECUTOR);
+      } else {
+        this.executor = executor;
+      }
     }
-    return new ChannelEssentials(transportFactory, terminationRunnable);
+
+    @Override
+    public ClientTransport newClientTransport() {
+      return new OkHttpClientTransport(host, port, authority, executor, socketFactory,
+              connectionSpec, maxMessageSize);
+    }
+
+    @Override
+    public String authority() {
+      return authority;
+    }
+
+    @Override
+    protected void deallocate() {
+      if (usingSharedExecutor) {
+        SharedResourceHolder.release(SHARED_EXECUTOR, (ExecutorService) executor);
+      }
+    }
   }
 }

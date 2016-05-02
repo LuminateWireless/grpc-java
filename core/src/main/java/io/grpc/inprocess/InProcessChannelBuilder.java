@@ -33,7 +33,9 @@ package io.grpc.inprocess;
 
 import com.google.common.base.Preconditions;
 
-import io.grpc.AbstractChannelBuilder;
+import io.grpc.ExperimentalApi;
+import io.grpc.internal.AbstractManagedChannelImplBuilder;
+import io.grpc.internal.AbstractReferenceCounted;
 import io.grpc.internal.ClientTransport;
 import io.grpc.internal.ClientTransportFactory;
 
@@ -43,7 +45,9 @@ import io.grpc.internal.ClientTransportFactory;
  *
  * <p>The channel is intended to be fully-featured, high performance, and useful in testing.
  */
-public class InProcessChannelBuilder extends AbstractChannelBuilder<InProcessChannelBuilder> {
+@ExperimentalApi("There is no plan to make this API stable.")
+public class InProcessChannelBuilder extends
+        AbstractManagedChannelImplBuilder<InProcessChannelBuilder> {
   /**
    * Create a channel builder that will connect to the server with the given name.
    *
@@ -55,20 +59,54 @@ public class InProcessChannelBuilder extends AbstractChannelBuilder<InProcessCha
   }
 
   private final String name;
+  private String authority = "localhost";
 
   private InProcessChannelBuilder(String name) {
     this.name = Preconditions.checkNotNull(name);
   }
 
+  /**
+   * Does nothing.
+   */
   @Override
-  protected ChannelEssentials buildEssentials() {
-    final String name = this.name;
-    ClientTransportFactory transportFactory = new ClientTransportFactory() {
-      @Override
-      public ClientTransport newClientTransport() {
-        return new InProcessTransport(name);
-      }
-    };
-    return new ChannelEssentials(transportFactory, null);
+  public InProcessChannelBuilder usePlaintext(boolean skipNegotiation) {
+    return this;
+  }
+
+  @Override
+  public InProcessChannelBuilder overrideAuthority(String authority) {
+    this.authority = authority;
+    return this;
+  }
+
+  @Override
+  protected ClientTransportFactory buildTransportFactory() {
+    return new InProcessClientTransportFactory(name, authority);
+  }
+
+  private static class InProcessClientTransportFactory extends AbstractReferenceCounted
+          implements ClientTransportFactory {
+    private final String name;
+    private final String authority;
+
+    private InProcessClientTransportFactory(String name, String authority) {
+      this.name = name;
+      this.authority = authority;
+    }
+
+    @Override
+    public ClientTransport newClientTransport() {
+      return new InProcessTransport(name);
+    }
+
+    @Override
+    public String authority() {
+      return authority;
+    }
+
+    @Override
+    protected void deallocate() {
+      // Do nothing.
+    }
   }
 }

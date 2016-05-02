@@ -46,6 +46,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * </ul>
  */
 @ThreadSafe
+@ExperimentalApi
 public interface ServerInterceptor {
   /**
    * Intercept {@link ServerCall} dispatch by the {@code next} {@link ServerCallHandler}. General
@@ -61,9 +62,9 @@ public interface ServerInterceptor {
    * @param next next processor in the interceptor chain
    * @return listener for processing incoming messages for {@code call}, never {@code null}.
    */
-  <RequestT, ResponseT> ServerCall.Listener<RequestT> interceptCall(
-      MethodDescriptor<RequestT, ResponseT> method,
-      ServerCall<ResponseT> call,
-      Metadata.Headers headers,
-      ServerCallHandler<RequestT, ResponseT> next);
+  <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+      MethodDescriptor<ReqT, RespT> method,
+      ServerCall<RespT> call,
+      Metadata headers,
+      ServerCallHandler<ReqT, RespT> next);
 }

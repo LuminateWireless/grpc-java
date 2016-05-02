@@ -49,7 +49,7 @@ public abstract class Channel {
   /**
    * Create a {@link ClientCall} to the remote operation specified by the given
    * {@link MethodDescriptor}. The returned {@link ClientCall} does not trigger any remote
-   * behavior until {@link ClientCall#start(ClientCall.Listener, Metadata.Headers)} is
+   * behavior until {@link ClientCall#start(ClientCall.Listener, Metadata)} is
    * invoked.
    *
    * @param methodDescriptor describes the name and parameter types of the operation to call.
@@ -59,4 +59,10 @@ public abstract class Channel {
    */
   public abstract <RequestT, ResponseT> ClientCall<RequestT, ResponseT> newCall(
       MethodDescriptor<RequestT, ResponseT> methodDescriptor, CallOptions callOptions);
+
+  /**
+   * The authority of the destination this channel connects to. Typically this is in the format
+   * {@code host:port}.
+   */
+  public abstract String authority();
 }

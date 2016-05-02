@@ -54,8 +54,9 @@ class NettyServerStream extends AbstractServerStream<Integer> {
   private final Http2Stream http2Stream;
   private final WriteQueue writeQueue;
 
-  NettyServerStream(Channel channel, Http2Stream http2Stream, NettyServerHandler handler) {
-    super(new NettyWritableBufferAllocator(channel.alloc()));
+  NettyServerStream(Channel channel, Http2Stream http2Stream, NettyServerHandler handler,
+                    int maxMessageSize) {
+    super(new NettyWritableBufferAllocator(channel.alloc()), maxMessageSize);
     this.writeQueue = handler.getWriteQueue();
     this.channel = checkNotNull(channel, "channel");
     this.http2Stream = checkNotNull(http2Stream, "http2Stream");
@@ -87,7 +88,7 @@ class NettyServerStream extends AbstractServerStream<Integer> {
   }
 
   @Override
-  protected void internalSendHeaders(Metadata.Headers headers) {
+  protected void internalSendHeaders(Metadata headers) {
     writeQueue.enqueue(new SendResponseHeadersCommand(id(),
         Utils.convertServerHeaders(headers), false),
         true);
@@ -126,5 +127,9 @@ class NettyServerStream extends AbstractServerStream<Integer> {
   @Override
   public void cancel(Status status) {
     writeQueue.enqueue(new CancelServerStreamCommand(this, status), true);
+  }
+
+  void useDecompressor(String messageEncoding) {
+    setDecompressor(messageEncoding);
   }
 }

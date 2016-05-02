@@ -1,18 +1,49 @@
+/*
+ * Copyright 2015, Google Inc. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above
+ * copyright notice, this list of conditions and the following disclaimer
+ * in the documentation and/or other materials provided with the
+ * distribution.
+ *
+ *    * Neither the name of Google Inc. nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
 package io.grpc.benchmarks.netty;
 
 import com.google.common.util.concurrent.MoreExecutors;
 
 import io.grpc.CallOptions;
-import io.grpc.ChannelImpl;
 import io.grpc.ClientCall;
 import io.grpc.Drainable;
 import io.grpc.KnownLength;
+import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.MethodType;
+import io.grpc.Server;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
-import io.grpc.ServerImpl;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.Status;
 import io.grpc.netty.NegotiationType;
@@ -155,13 +186,13 @@ public abstract class AbstractBenchmark {
   }
 
 
-  protected ServerImpl server;
+  protected Server server;
   protected ByteBuf request;
   protected ByteBuf response;
   protected MethodDescriptor<ByteBuf, ByteBuf> unaryMethod;
   private MethodDescriptor<ByteBuf, ByteBuf> pingPongMethod;
   private MethodDescriptor<ByteBuf, ByteBuf> flowControlledStreaming;
-  protected ChannelImpl[] channels;
+  protected ManagedChannel[] channels;
 
   public AbstractBenchmark() {
   }
@@ -221,15 +252,15 @@ public abstract class AbstractBenchmark {
 
     // Simple method that sends and receives NettyByteBuf
     unaryMethod = MethodDescriptor.create(MethodType.UNARY,
-        "benchmark", "unary",
+        "benchmark/unary",
         new ByteBufOutputMarshaller(),
         new ByteBufOutputMarshaller());
     pingPongMethod = MethodDescriptor.create(MethodType.BIDI_STREAMING,
-        "benchmark", "pingPong",
+        "benchmark/pingPong",
         new ByteBufOutputMarshaller(),
         new ByteBufOutputMarshaller());
     flowControlledStreaming = MethodDescriptor.create(MethodType.BIDI_STREAMING,
-        "benchmark", "flowControlledStreaming",
+        "benchmark/flowControlledStreaming",
         new ByteBufOutputMarshaller(),
         new ByteBufOutputMarshaller());
 
@@ -242,7 +273,7 @@ public abstract class AbstractBenchmark {
                   public ServerCall.Listener<ByteBuf> startCall(
                       MethodDescriptor<ByteBuf, ByteBuf> method,
                       final ServerCall<ByteBuf> call,
-                      Metadata.Headers headers) {
+                      Metadata headers) {
                     call.request(1);
                     return new ServerCall.Listener<ByteBuf>() {
                       @Override
@@ -274,7 +305,7 @@ public abstract class AbstractBenchmark {
                   public ServerCall.Listener<ByteBuf> startCall(
                       MethodDescriptor<ByteBuf, ByteBuf> method,
                       final ServerCall<ByteBuf> call,
-                      Metadata.Headers headers) {
+                      Metadata headers) {
                     call.request(1);
                     return new ServerCall.Listener<ByteBuf>() {
                       @Override
@@ -308,7 +339,7 @@ public abstract class AbstractBenchmark {
                   public ServerCall.Listener<ByteBuf> startCall(
                       MethodDescriptor<ByteBuf, ByteBuf> method,
                       final ServerCall<ByteBuf> call,
-                      Metadata.Headers headers) {
+                      Metadata headers) {
                     call.request(1);
                     return new ServerCall.Listener<ByteBuf>() {
                       @Override
@@ -350,7 +381,7 @@ public abstract class AbstractBenchmark {
     // Build and start the clients and servers
     server = serverBuilder.build();
     server.start();
-    channels = new ChannelImpl[channelCount];
+    channels = new ManagedChannel[channelCount];
     for (int i = 0; i < channelCount; i++) {
       // Use a dedicated event-loop for each channel
       channels[i] = channelBuilder
@@ -368,11 +399,11 @@ public abstract class AbstractBenchmark {
                                  final AtomicLong counter,
                                  final AtomicBoolean done,
                                  final long counterDelta) {
-    for (final ChannelImpl channel : channels) {
+    for (final ManagedChannel channel : channels) {
       for (int i = 0; i < callsPerChannel; i++) {
         StreamObserver<ByteBuf> observer = new StreamObserver<ByteBuf>() {
           @Override
-          public void onValue(ByteBuf value) {
+          public void onNext(ByteBuf value) {
             counter.addAndGet(counterDelta);
           }
 
@@ -404,7 +435,7 @@ public abstract class AbstractBenchmark {
                                      final AtomicLong counter,
                                      final AtomicBoolean done,
                                      final long counterDelta) {
-    for (final ChannelImpl channel : channels) {
+    for (final ManagedChannel channel : channels) {
       for (int i = 0; i < callsPerChannel; i++) {
         final ClientCall<ByteBuf, ByteBuf> streamingCall =
             channel.newCall(pingPongMethod, CALL_OPTIONS);
@@ -414,13 +445,11 @@ public abstract class AbstractBenchmark {
             streamingCall,
             new StreamObserver<ByteBuf>() {
               @Override
-              public void onValue(ByteBuf value) {
+              public void onNext(ByteBuf value) {
                 if (!done.get()) {
                   counter.addAndGet(counterDelta);
-                  requestObserverRef.get().onValue(request.slice());
+                  requestObserverRef.get().onNext(request.slice());
                   streamingCall.request(1);
-                } else {
-                  requestObserverRef.get().onCompleted();
                 }
               }
 
@@ -434,8 +463,8 @@ public abstract class AbstractBenchmark {
               }
             });
         requestObserverRef.set(requestObserver);
-        requestObserver.onValue(request.slice());
-        requestObserver.onValue(request.slice());
+        requestObserver.onNext(request.slice());
+        requestObserver.onNext(request.slice());
       }
     }
   }
@@ -449,7 +478,7 @@ public abstract class AbstractBenchmark {
                                                    final AtomicLong counter,
                                                    final AtomicBoolean done,
                                                    final long counterDelta) {
-    for (final ChannelImpl channel : channels) {
+    for (final ManagedChannel channel : channels) {
       for (int i = 0; i < callsPerChannel; i++) {
         final ClientCall<ByteBuf, ByteBuf> streamingCall =
             channel.newCall(flowControlledStreaming, CALL_OPTIONS);
@@ -459,12 +488,10 @@ public abstract class AbstractBenchmark {
             streamingCall,
             new StreamObserver<ByteBuf>() {
               @Override
-              public void onValue(ByteBuf value) {
+              public void onNext(ByteBuf value) {
                 if (!done.get()) {
                   counter.addAndGet(counterDelta);
                   streamingCall.request(1);
-                } else {
-                  requestObserverRef.get().onCompleted();
                 }
               }
 
@@ -478,7 +505,7 @@ public abstract class AbstractBenchmark {
               }
             });
         requestObserverRef.set(requestObserver);
-        requestObserver.onValue(request.slice());
+        requestObserver.onNext(request.slice());
       }
     }
   }
@@ -487,7 +514,7 @@ public abstract class AbstractBenchmark {
    * Shutdown all the client channels and then shutdown the server.
    */
   protected void teardown() throws Exception {
-    for (ChannelImpl channel : channels) {
+    for (ManagedChannel channel : channels) {
       channel.shutdown();
     }
     server.shutdown().awaitTermination(5, TimeUnit.SECONDS);

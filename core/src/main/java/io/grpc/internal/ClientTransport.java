@@ -67,7 +67,7 @@ public interface ClientTransport {
    */
   // TODO(nmittler): Consider also throwing for stopping.
   ClientStream newStream(MethodDescriptor<?, ?> method,
-                         Metadata.Headers headers,
+                         Metadata headers,
                          ClientStreamListener listener);
 
   /**
@@ -146,4 +146,9 @@ public interface ClientTransport {
      */
     void pingFailed(Throwable cause);
   }
+  
+  /**
+   *  Return the remote address (server address) of the transport.
+   */
+  String remoteAddress();
 }

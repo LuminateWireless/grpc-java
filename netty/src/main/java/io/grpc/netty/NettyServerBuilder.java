@@ -31,32 +31,43 @@
 
 package io.grpc.netty;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
+
 import com.google.common.base.Preconditions;
 
-import io.grpc.AbstractServerBuilder;
+import io.grpc.ExperimentalApi;
 import io.grpc.HandlerRegistry;
-import io.grpc.internal.SharedResourceHolder;
+import io.grpc.internal.AbstractServerImplBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.ServerChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.ssl.SslContext;
 
+import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+
+import javax.annotation.Nullable;
+import javax.net.ssl.SSLException;
 
 /**
  * A builder to help simplify the construction of a Netty-based GRPC server.
  */
-public final class NettyServerBuilder extends AbstractServerBuilder<NettyServerBuilder> {
+@ExperimentalApi("There is no plan to make this API stable, given transport API instability")
+public final class NettyServerBuilder extends AbstractServerImplBuilder<NettyServerBuilder> {
   public static final int DEFAULT_FLOW_CONTROL_WINDOW = 1048576; // 1MiB
 
   private final SocketAddress address;
   private Class<? extends ServerChannel> channelType = NioServerSocketChannel.class;
-  private EventLoopGroup userBossEventLoopGroup;
-  private EventLoopGroup userWorkerEventLoopGroup;
+  @Nullable
+  private EventLoopGroup bossEventLoopGroup;
+  @Nullable
+  private EventLoopGroup workerEventLoopGroup;
   private SslContext sslContext;
   private int maxConcurrentCallsPerConnection = Integer.MAX_VALUE;
   private int flowControlWindow = DEFAULT_FLOW_CONTROL_WINDOW;
+  private int maxMessageSize = DEFAULT_MAX_MESSAGE_SIZE;
 
   /**
    * Creates a server builder that will bind to the given port.
@@ -120,17 +131,17 @@ public final class NettyServerBuilder extends AbstractServerBuilder<NettyServerB
    * <p>The server won't take ownership of the given EventLoopGroup. It's caller's responsibility
    * to shut it down when it's desired.
    *
-   * <p>Grpc uses non-daemon {@link Thread}s by default and thus a {@link io.grpc.ServerImpl} will
+   * <p>Grpc uses non-daemon {@link Thread}s by default and thus a {@link io.grpc.Server} will
    * continue to run even after the main thread has terminated. However, users have to be cautious
    * when providing their own {@link EventLoopGroup}s.
    * For example, Netty's {@link EventLoopGroup}s use daemon threads by default
    * and thus an application with only daemon threads running besides the main thread will exit as
    * soon as the main thread completes.
-   * A simple solution to this problem is to call {@link io.grpc.ServerImpl#awaitTermination()} to
+   * A simple solution to this problem is to call {@link io.grpc.Server#awaitTermination()} to
    * keep the main thread alive until the server has terminated.
    */
   public NettyServerBuilder bossEventLoopGroup(EventLoopGroup group) {
-    this.userBossEventLoopGroup = group;
+    this.bossEventLoopGroup = group;
     return this;
   }
 
@@ -143,17 +154,17 @@ public final class NettyServerBuilder extends AbstractServerBuilder<NettyServerB
    * <p>The server won't take ownership of the given EventLoopGroup. It's caller's responsibility
    * to shut it down when it's desired.
    *
-   * <p>Grpc uses non-daemon {@link Thread}s by default and thus a {@link io.grpc.ServerImpl} will
+   * <p>Grpc uses non-daemon {@link Thread}s by default and thus a {@link io.grpc.Server} will
    * continue to run even after the main thread has terminated. However, users have to be cautious
    * when providing their own {@link EventLoopGroup}s.
    * For example, Netty's {@link EventLoopGroup}s use daemon threads by default
    * and thus an application with only daemon threads running besides the main thread will exit as
    * soon as the main thread completes.
-   * A simple solution to this problem is to call {@link io.grpc.ServerImpl#awaitTermination()} to
+   * A simple solution to this problem is to call {@link io.grpc.Server#awaitTermination()} to
    * keep the main thread alive until the server has terminated.
    */
   public NettyServerBuilder workerEventLoopGroup(EventLoopGroup group) {
-    this.userWorkerEventLoopGroup = group;
+    this.workerEventLoopGroup = group;
     return this;
   }
 
@@ -186,26 +197,31 @@ public final class NettyServerBuilder extends AbstractServerBuilder<NettyServerB
     return this;
   }
 
+  /**
+   * Sets the maximum message size allowed to be received on the server. If not called,
+   * defaults to 100 MiB.
+   */
+  public NettyServerBuilder maxMessageSize(int maxMessageSize) {
+    checkArgument(maxMessageSize >= 0, "maxMessageSize must be >= 0");
+    this.maxMessageSize = maxMessageSize;
+    return this;
+  }
+
   @Override
-  protected ServerEssentials buildEssentials() {
-    final EventLoopGroup bossEventLoopGroup  = (userBossEventLoopGroup == null)
-        ? SharedResourceHolder.get(Utils.DEFAULT_BOSS_EVENT_LOOP_GROUP) : userBossEventLoopGroup;
-    final EventLoopGroup workerEventLoopGroup = (userWorkerEventLoopGroup == null)
-        ? SharedResourceHolder.get(Utils.DEFAULT_WORKER_EVENT_LOOP_GROUP)
-        : userWorkerEventLoopGroup;
-    NettyServer server = new NettyServer(address, channelType, bossEventLoopGroup,
-        workerEventLoopGroup, sslContext, maxConcurrentCallsPerConnection, flowControlWindow);
-    Runnable terminationRunnable = new Runnable() {
-      @Override
-      public void run() {
-        if (userBossEventLoopGroup == null) {
-          SharedResourceHolder.release(Utils.DEFAULT_BOSS_EVENT_LOOP_GROUP, bossEventLoopGroup);
-        }
-        if (userWorkerEventLoopGroup == null) {
-          SharedResourceHolder.release(Utils.DEFAULT_WORKER_EVENT_LOOP_GROUP, workerEventLoopGroup);
-        }
-      }
-    };
-    return new ServerEssentials(server, terminationRunnable);
+  protected NettyServer buildTransportServer() {
+    return new NettyServer(address, channelType, bossEventLoopGroup,
+            workerEventLoopGroup, sslContext, maxConcurrentCallsPerConnection, flowControlWindow,
+            maxMessageSize);
+  }
+
+  @Override
+  public NettyServerBuilder useTransportSecurity(File certChain, File privateKey) {
+    try {
+      sslContext = GrpcSslContexts.forServer(certChain, privateKey).build();
+    } catch (SSLException e) {
+      // This should likely be some other, easier to catch exception.
+      throw new RuntimeException(e);
+    }
+    return this;
   }
 }

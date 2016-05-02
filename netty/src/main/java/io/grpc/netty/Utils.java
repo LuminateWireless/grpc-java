@@ -31,15 +31,16 @@
 
 package io.grpc.netty;
 
-import static io.grpc.internal.HttpUtil.CONTENT_TYPE_KEY;
-import static io.grpc.internal.HttpUtil.USER_AGENT_KEY;
+import static io.grpc.internal.GrpcUtil.AUTHORITY_KEY;
+import static io.grpc.internal.GrpcUtil.CONTENT_TYPE_KEY;
+import static io.grpc.internal.GrpcUtil.USER_AGENT_KEY;
 import static io.netty.util.CharsetUtil.UTF_8;
 
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import io.grpc.Metadata;
-import io.grpc.internal.HttpUtil;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.SharedResourceHolder.Resource;
 import io.grpc.internal.TransportFrameUtil;
 import io.netty.channel.EventLoopGroup;
@@ -62,15 +63,15 @@ import java.util.concurrent.TimeUnit;
 class Utils {
 
   public static final ByteString STATUS_OK = new ByteString("200".getBytes(UTF_8));
-  public static final ByteString HTTP_METHOD = new ByteString(HttpUtil.HTTP_METHOD.getBytes(UTF_8));
+  public static final ByteString HTTP_METHOD = new ByteString(GrpcUtil.HTTP_METHOD.getBytes(UTF_8));
   public static final ByteString HTTPS = new ByteString("https".getBytes(UTF_8));
   public static final ByteString HTTP = new ByteString("http".getBytes(UTF_8));
   public static final ByteString CONTENT_TYPE_HEADER = new ByteString(CONTENT_TYPE_KEY.name()
       .getBytes(UTF_8));
   public static final ByteString CONTENT_TYPE_GRPC = new ByteString(
-      HttpUtil.CONTENT_TYPE_GRPC.getBytes(UTF_8));
+      GrpcUtil.CONTENT_TYPE_GRPC.getBytes(UTF_8));
   public static final ByteString TE_HEADER = new ByteString("te".getBytes(UTF_8));
-  public static final ByteString TE_TRAILERS = new ByteString(HttpUtil.TE_TRAILERS.getBytes(UTF_8));
+  public static final ByteString TE_TRAILERS = new ByteString(GrpcUtil.TE_TRAILERS.getBytes(UTF_8));
   public static final ByteString USER_AGENT = new ByteString(USER_AGENT_KEY.name().getBytes(UTF_8));
 
   public static final Resource<EventLoopGroup> DEFAULT_BOSS_EVENT_LOOP_GROUP =
@@ -79,16 +80,8 @@ class Utils {
   public static final Resource<EventLoopGroup> DEFAULT_WORKER_EVENT_LOOP_GROUP =
       new DefaultEventLoopGroupResource(0, "grpc-default-worker-ELG");
 
-  public static Metadata.Headers convertHeaders(Http2Headers http2Headers) {
-    Metadata.Headers headers = new Metadata.Headers(convertHeadersToArray(http2Headers));
-    if (http2Headers.authority() != null) {
-      // toString() here is safe since it doesn't use the default Charset.
-      headers.setAuthority(http2Headers.authority().toString());
-    }
-    if (http2Headers.path() != null) {
-      headers.setPath(http2Headers.path().toString());
-    }
-    return headers;
+  public static Metadata convertHeaders(Http2Headers http2Headers) {
+    return new Metadata(convertHeadersToArray(http2Headers));
   }
 
   private static byte[][] convertHeadersToArray(Http2Headers http2Headers) {
@@ -103,7 +96,7 @@ class Utils {
     return TransportFrameUtil.toRawSerializedHeaders(headerValues);
   }
 
-  public static Http2Headers convertClientHeaders(Metadata.Headers headers,
+  public static Http2Headers convertClientHeaders(Metadata headers,
       ByteString scheme,
       ByteString defaultPath,
       ByteString defaultAuthority) {
@@ -121,21 +114,18 @@ class Utils {
         .set(TE_HEADER, TE_TRAILERS);
 
     // Override the default authority and path if provided by the headers.
-    if (headers.getAuthority() != null) {
-      http2Headers.authority(new ByteString(headers.getAuthority().getBytes(UTF_8)));
-    }
-    if (headers.getPath() != null) {
-      http2Headers.path(new ByteString(headers.getPath().getBytes(UTF_8)));
+    if (headers.containsKey(AUTHORITY_KEY)) {
+      http2Headers.authority(new ByteString(headers.get(AUTHORITY_KEY).getBytes(UTF_8)));
     }
 
     // Set the User-Agent header.
-    String userAgent = HttpUtil.getGrpcUserAgent("netty", headers.get(USER_AGENT_KEY));
+    String userAgent = GrpcUtil.getGrpcUserAgent("netty", headers.get(USER_AGENT_KEY));
     http2Headers.set(USER_AGENT, new ByteString(userAgent.getBytes(UTF_8)));
 
     return http2Headers;
   }
 
-  public static Http2Headers convertServerHeaders(Metadata.Headers headers) {
+  public static Http2Headers convertServerHeaders(Metadata headers) {
     Http2Headers http2Headers = convertMetadata(headers);
     http2Headers.set(CONTENT_TYPE_HEADER, CONTENT_TYPE_GRPC);
     http2Headers.status(STATUS_OK);
@@ -180,7 +170,10 @@ class Utils {
     @Override
     public EventLoopGroup create() {
       // Use the executor based constructor so we can work with both Netty4 & Netty5.
-      ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat(name + "-%d").build();
+      ThreadFactory threadFactory = new ThreadFactoryBuilder()
+          .setDaemon(true)
+          .setNameFormat(name + "-%d")
+          .build();
       int parallelism = numEventLoops == 0
           ? Runtime.getRuntime().availableProcessors() * 2 : numEventLoops;
       final ExecutorService executor = Executors.newFixedThreadPool(parallelism, threadFactory);

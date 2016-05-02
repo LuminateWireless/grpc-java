@@ -63,8 +63,9 @@ public abstract class AbstractServerStream<IdT> extends AbstractStream<IdT>
   /** Saved trailers from close() that need to be sent once the framer has sent all messages. */
   private Metadata stashedTrailers;
 
-  protected AbstractServerStream(WritableBufferAllocator bufferAllocator) {
-    super(bufferAllocator);
+  protected AbstractServerStream(WritableBufferAllocator bufferAllocator,
+                                 int maxMessageSize) {
+    super(bufferAllocator, maxMessageSize);
   }
 
   /**
@@ -87,11 +88,11 @@ public abstract class AbstractServerStream<IdT> extends AbstractStream<IdT>
   @Override
   protected void receiveMessage(InputStream is) {
     inboundPhase(Phase.MESSAGE);
-    listener.messageRead(is);
+    listener().messageRead(is);
   }
 
   @Override
-  public final void writeHeaders(Metadata.Headers headers) {
+  public final void writeHeaders(Metadata headers) {
     Preconditions.checkNotNull(headers, "headers");
     outboundPhase(Phase.HEADERS);
     headersSent = true;
@@ -101,9 +102,8 @@ public abstract class AbstractServerStream<IdT> extends AbstractStream<IdT>
 
   @Override
   public final void writeMessage(InputStream message) {
-    if (!headersSent) {
-      writeHeaders(new Metadata.Headers());
-      headersSent = true;
+    if (outboundPhase() != Phase.MESSAGE) {
+      throw new IllegalStateException("Messages are only permitted after headers and before close");
     }
     super.writeMessage(message);
   }
@@ -114,7 +114,7 @@ public abstract class AbstractServerStream<IdT> extends AbstractStream<IdT>
     Preconditions.checkNotNull(trailers, "trailers");
     if (outboundPhase(Phase.STATUS) != Phase.STATUS) {
       gracefulClose = true;
-      this.stashedTrailers = trailers;
+      stashedTrailers = trailers;
       writeStatusToTrailers(status);
       closeFramer();
     }
@@ -169,7 +169,7 @@ public abstract class AbstractServerStream<IdT> extends AbstractStream<IdT>
    *
    * @param headers the headers to be sent to client.
    */
-  protected abstract void internalSendHeaders(Metadata.Headers headers);
+  protected abstract void internalSendHeaders(Metadata headers);
 
   /**
    * Sends an outbound frame to the remote end point.
@@ -252,7 +252,7 @@ public abstract class AbstractServerStream<IdT> extends AbstractStream<IdT>
   private void halfCloseListener() {
     if (inboundPhase(Phase.STATUS) != Phase.STATUS && !listenerClosed) {
       closeDeframer();
-      listener.halfClosed();
+      listener().halfClosed();
     }
   }
 
@@ -263,7 +263,7 @@ public abstract class AbstractServerStream<IdT> extends AbstractStream<IdT>
     if (!listenerClosed) {
       listenerClosed = true;
       closeDeframer();
-      listener.closed(newStatus);
+      listener().closed(newStatus);
     }
   }
 }

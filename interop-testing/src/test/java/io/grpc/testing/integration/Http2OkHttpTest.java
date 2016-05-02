@@ -34,15 +34,19 @@ package io.grpc.testing.integration;
 import com.squareup.okhttp.ConnectionSpec;
 import com.squareup.okhttp.TlsVersion;
 
-import io.grpc.ChannelImpl;
+import io.grpc.ManagedChannel;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.okhttp.OkHttpChannelBuilder;
+import io.grpc.stub.StreamObserver;
+import io.grpc.testing.StreamRecorder;
 import io.grpc.testing.TestUtils;
 import io.netty.handler.ssl.SupportedCipherSuiteFilter;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
@@ -75,13 +79,14 @@ public class Http2OkHttpTest extends AbstractTransportTest {
   }
 
   @Override
-  protected ChannelImpl createChannel() {
+  protected ManagedChannel createChannel() {
     OkHttpChannelBuilder builder = OkHttpChannelBuilder.forAddress("127.0.0.1", serverPort)
         .connectionSpec(new ConnectionSpec.Builder(OkHttpChannelBuilder.DEFAULT_CONNECTION_SPEC)
             .cipherSuites(TestUtils.preferredTestCiphers().toArray(new String[0]))
             .tlsVersions(ConnectionSpec.MODERN_TLS.tlsVersions().toArray(new TlsVersion[0]))
             .build())
-        .overrideHostForAuthority(TestUtils.TEST_SERVER_HOST);
+        .overrideAuthority(GrpcUtil.authorityFromHostAndPort(
+            TestUtils.TEST_SERVER_HOST, serverPort));
     try {
       builder.sslSocketFactory(TestUtils.newSslSocketFactoryForCa(
           TestUtils.loadCert("ca.pem")));
@@ -89,5 +94,28 @@ public class Http2OkHttpTest extends AbstractTransportTest {
       throw new RuntimeException(e);
     }
     return builder.build();
+  }
+
+  @Test(timeout = 10000)
+  public void receivedDataForFinishedStream() throws Exception {
+    Messages.ResponseParameters.Builder responseParameters =
+        Messages.ResponseParameters.newBuilder()
+        .setSize(1);
+    Messages.StreamingOutputCallRequest.Builder requestBuilder =
+        Messages.StreamingOutputCallRequest.newBuilder()
+            .setResponseType(Messages.PayloadType.COMPRESSABLE);
+    for (int i = 0; i < 10000; i++) {
+      requestBuilder.addResponseParameters(responseParameters);
+    }
+
+    StreamRecorder<Messages.StreamingOutputCallResponse> recorder = StreamRecorder.create();
+    StreamObserver<Messages.StreamingOutputCallRequest> requestStream =
+        asyncStub.fullDuplexCall(recorder);
+    requestStream.onNext(requestBuilder.build());
+    recorder.firstValue().get();
+    requestStream.onError(new Exception("failed"));
+
+    recorder.awaitCompletion();
+    emptyUnary();
   }
 }

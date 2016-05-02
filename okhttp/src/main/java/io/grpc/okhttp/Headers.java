@@ -31,15 +31,16 @@
 
 package io.grpc.okhttp;
 
-import static io.grpc.internal.HttpUtil.CONTENT_TYPE_KEY;
-import static io.grpc.internal.HttpUtil.USER_AGENT_KEY;
+import static io.grpc.internal.GrpcUtil.AUTHORITY_KEY;
+import static io.grpc.internal.GrpcUtil.CONTENT_TYPE_KEY;
+import static io.grpc.internal.GrpcUtil.USER_AGENT_KEY;
 
 import com.google.common.base.Preconditions;
 
 import com.squareup.okhttp.internal.spdy.Header;
 
 import io.grpc.Metadata;
-import io.grpc.internal.HttpUtil;
+import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.TransportFrameUtil;
 
 import okio.ByteString;
@@ -53,17 +54,17 @@ import java.util.List;
 public class Headers {
 
   public static final Header SCHEME_HEADER = new Header(Header.TARGET_SCHEME, "https");
-  public static final Header METHOD_HEADER = new Header(Header.TARGET_METHOD, HttpUtil.HTTP_METHOD);
+  public static final Header METHOD_HEADER = new Header(Header.TARGET_METHOD, GrpcUtil.HTTP_METHOD);
   public static final Header CONTENT_TYPE_HEADER =
-      new Header(CONTENT_TYPE_KEY.name(), HttpUtil.CONTENT_TYPE_GRPC);
-  public static final Header TE_HEADER = new Header("te", HttpUtil.TE_TRAILERS);
+      new Header(CONTENT_TYPE_KEY.name(), GrpcUtil.CONTENT_TYPE_GRPC);
+  public static final Header TE_HEADER = new Header("te", GrpcUtil.TE_TRAILERS);
 
   /**
    * Serializes the given headers and creates a list of OkHttp {@link Header}s to be used when
    * creating a stream. Since this serializes the headers, this method should be called in the
    * application thread context.
    */
-  public static List<Header> createRequestHeaders(Metadata.Headers headers, String defaultPath,
+  public static List<Header> createRequestHeaders(Metadata headers, String defaultPath,
       String defaultAuthority) {
     Preconditions.checkNotNull(headers, "headers");
     Preconditions.checkNotNull(defaultPath, "defaultPath");
@@ -74,13 +75,16 @@ public class Headers {
     // Set GRPC-specific headers.
     okhttpHeaders.add(SCHEME_HEADER);
     okhttpHeaders.add(METHOD_HEADER);
-    String authority = headers.getAuthority() != null ? headers.getAuthority() : defaultAuthority;
+
+    String authority = headers.containsKey(AUTHORITY_KEY)
+        ? headers.get(AUTHORITY_KEY) : defaultAuthority;
+    headers.removeAll(AUTHORITY_KEY);
     okhttpHeaders.add(new Header(Header.TARGET_AUTHORITY, authority));
-    String path = headers.getPath() != null ? headers.getPath() : defaultPath;
+    String path = defaultPath;
     okhttpHeaders.add(new Header(Header.TARGET_PATH, path));
 
-    String userAgent = HttpUtil.getGrpcUserAgent("okhttp", headers.get(USER_AGENT_KEY));
-    okhttpHeaders.add(new Header(HttpUtil.USER_AGENT_KEY.name(), userAgent));
+    String userAgent = GrpcUtil.getGrpcUserAgent("okhttp", headers.get(USER_AGENT_KEY));
+    okhttpHeaders.add(new Header(GrpcUtil.USER_AGENT_KEY.name(), userAgent));
 
     // All non-pseudo headers must come after pseudo headers.
     okhttpHeaders.add(CONTENT_TYPE_HEADER);

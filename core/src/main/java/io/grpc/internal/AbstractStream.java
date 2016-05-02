@@ -31,11 +31,17 @@
 
 package io.grpc.internal;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Objects;
+
+import io.grpc.Codec;
+import io.grpc.Compressor;
+import io.grpc.Decompressor;
+import io.grpc.DecompressorRegistry;
 
 import java.io.InputStream;
 
@@ -95,7 +101,7 @@ public abstract class AbstractStream<IdT> implements Stream {
 
   private final Object onReadyLock = new Object();
 
-  AbstractStream(WritableBufferAllocator bufferAllocator) {
+  AbstractStream(WritableBufferAllocator bufferAllocator, int maxMessageSize) {
     MessageDeframer.Listener inboundMessageHandler = new MessageDeframer.Listener() {
       @Override
       public void bytesRead(int numBytes) {
@@ -125,7 +131,7 @@ public abstract class AbstractStream<IdT> implements Stream {
     };
 
     framer = new MessageFramer(outboundFrameHandler, bufferAllocator);
-    deframer = new MessageDeframer(inboundMessageHandler);
+    deframer = new MessageDeframer(inboundMessageHandler, Codec.Identity.NONE, maxMessageSize);
   }
 
   /**
@@ -278,6 +284,38 @@ public abstract class AbstractStream<IdT> implements Stream {
     } catch (Throwable t) {
       deframeFailed(t);
     }
+  }
+
+  /**
+   * Set the decompressor for this stream.  This may be called at most once.  Typically this is set
+   * after the message encoding header is provided by the remote host, but before any messages are
+   * received.
+   */
+  @Override
+  public final void setDecompressor(Decompressor d) {
+    deframer.setDecompressor(d);
+  }
+
+  /**
+   * Looks up the decompressor by its message encoding name, and sets it for this stream.
+   * Decompressors are registered with {@link DecompressorRegistry#register}.
+   *
+   * @param messageEncoding the name of the encoding provided by the remote host
+   * @throws IllegalArgumentException if the provided message encoding cannot be found.
+   */
+  @Override
+  public final void setDecompressor(String messageEncoding) {
+    Decompressor d = DecompressorRegistry.lookupDecompressor(messageEncoding);
+    checkArgument(d != null,
+        "Unable to find decompressor for message encoding %s", messageEncoding);
+    setDecompressor(d);
+  }
+
+  @Override
+  public void setCompressor(Compressor c) {
+    // TODO(carl-mastrangelo): check that headers haven't already been sent.  I can't find where
+    // the client stream changes outbound phase correctly, so I am ignoring it.
+    framer.setCompressor(c);
   }
 
   /**

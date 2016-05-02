@@ -38,6 +38,8 @@ import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 
+import io.grpc.internal.GrpcUtil;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -56,18 +58,21 @@ import javax.annotation.concurrent.NotThreadSafe;
  * </p>
  */
 @NotThreadSafe
-public class Metadata {
+public final class Metadata {
 
   /**
    * All binary headers should have this suffix in their names. Vice versa.
+   *
+   * <p>Its value is {@code "-bin"}. An ASCII header's name must not end with this.
    */
   public static final String BINARY_HEADER_SUFFIX = "-bin";
 
   /**
    * Simple metadata marshaller that encodes strings as is.
    *
-   * <p>This should be used with ASCII strings that only contain printable characters and space.
-   * Otherwise the output may be considered invalid and discarded by the transport.
+   * <p>This should be used with ASCII strings that only contain the characters listed in the class
+   * comment of {@link AsciiMarshaller}. Otherwise the output may be considered invalid and
+   * discarded by the transport, or the call may fail.
    */
   public static final AsciiMarshaller<String> ASCII_STRING_MARSHALLER =
       new AsciiMarshaller<String>() {
@@ -86,7 +91,7 @@ public class Metadata {
   /**
    * Simple metadata marshaller that encodes an integer as a signed decimal string.
    */
-  public static final AsciiMarshaller<Integer> INTEGER_MARSHALLER = new AsciiMarshaller<Integer>() {
+  static final AsciiMarshaller<Integer> INTEGER_MARSHALLER = new AsciiMarshaller<Integer>() {
 
     @Override
     public String toAsciiString(Integer value) {
@@ -108,6 +113,7 @@ public class Metadata {
    * Constructor called by the transport layer when it receives binary metadata.
    */
   // TODO(louiscryan): Convert to use ByteString so we can cache transformations
+  @Internal
   public Metadata(byte[]... binaryValues) {
     for (int i = 0; i < binaryValues.length; i++) {
       String name = new String(binaryValues[i], US_ASCII);
@@ -228,17 +234,24 @@ public class Metadata {
    * <p>It produces serialized names and values interleaved. result[i*2] are names, while
    * result[i*2+1] are values.
    *
-   * <p>Names are ASCII string bytes. If the name ends with "-bin", the value can be raw binary.
-   * Otherwise, the value must be printable ASCII characters or space.
+   * <p>Names are ASCII string bytes that contains only the characters listed in the class comment
+   * of {@link Key}. If the name ends with {@code "-bin"}, the value can be raw binary.  Otherwise,
+   * the value must contain only characters listed in the class comments of {@link AsciiMarshaller}
    *
    * <p>The returned byte arrays <em>must not</em> be modified.
    *
    * <p>This method is intended for transport use only.
    */
+  @Internal
   public byte[][] serialize() {
     // One *2 for keys+values, one *2 to prevent resizing if a single key has multiple values
     List<byte[]> serialized = new ArrayList<byte[]>(store.size() * 2 * 2);
     for (Map.Entry<String, List<MetadataEntry>> keyEntry : store.entrySet()) {
+      // Intentionally skip this field on serialization.  It must be handled special by the
+      // transport.
+      if (keyEntry.getKey().equals(GrpcUtil.AUTHORITY_KEY.name())) {
+        continue;
+      }
       for (int i = 0; i < keyEntry.getValue().size(); i++) {
         MetadataEntry entry = keyEntry.getValue().get(i);
         byte[] asciiName;
@@ -296,104 +309,6 @@ public class Metadata {
   }
 
   /**
-   * Concrete instance for metadata attached to the start of a call.
-   */
-  public static class Headers extends Metadata {
-    private String path;
-    private String authority;
-
-    /**
-     * Called by the transport layer to create headers from their binary serialized values.
-     *
-     * <p>This method does not copy the provided byte arrays. The byte arrays must not be mutated.
-     */
-    public Headers(byte[]... headers) {
-      super(headers);
-    }
-
-    /**
-     * Called by the application layer to construct headers prior to passing them to the
-     * transport for serialization.
-     */
-    public Headers() {
-    }
-
-    /**
-     * The path for the operation.
-     */
-    public String getPath() {
-      return path;
-    }
-
-    public void setPath(String path) {
-      this.path = path;
-    }
-
-    /**
-     * The serving authority for the operation.
-     */
-    public String getAuthority() {
-      return authority;
-    }
-
-    /**
-     * Override the HTTP/2 authority the channel claims to be connecting to. <em>This is not
-     * generally safe.</em> Overriding allows advanced users to re-use a single Channel for multiple
-     * services, even if those services are hosted on different domain names. That assumes the
-     * server is virtually hosting multiple domains and is guaranteed to continue doing so. It is
-     * rare for a service provider to make such a guarantee. <em>At this time, there is no security
-     * verification of the overridden value, such as making sure the authority matches the server's
-     * TLS certificate.</em>
-     */
-    public void setAuthority(String authority) {
-      this.authority = authority;
-    }
-
-    @Override
-    public void merge(Metadata other) {
-      super.merge(other);
-      mergePathAndAuthority(other);
-    }
-
-    @Override
-    public void merge(Metadata other, Set<Key<?>> keys) {
-      super.merge(other, keys);
-      mergePathAndAuthority(other);
-    }
-
-    private void mergePathAndAuthority(Metadata other) {
-      if (other instanceof Headers) {
-        Headers otherHeaders = (Headers) other;
-        path = otherHeaders.path != null ? otherHeaders.path : path;
-        authority = otherHeaders.authority != null ? otherHeaders.authority : authority;
-      }
-    }
-
-    @Override
-    public String toString() {
-      return "Headers(path=" + path
-          + ",authority=" + authority
-          + ",metadata=" + super.toStringInternal() + ")";
-    }
-  }
-
-  /**
-   * Concrete instance for metadata attached to the end of the call. Only provided by
-   * servers.
-   *
-   * @deprecated use Metadata instead.
-   */
-  @Deprecated
-  public static class Trailers extends Metadata {
-    /**
-     * Called by the application layer to construct trailers prior to passing them to the
-     * transport for serialization.
-     */
-    public Trailers() {
-    }
-  }
-
-  /**
    * Marshaller for metadata values that are serialized into raw binary.
    */
   public interface BinaryMarshaller<T> {
@@ -414,12 +329,20 @@ public class Metadata {
 
   /**
    * Marshaller for metadata values that are serialized into ASCII strings that contain only
-   * printable characters and space.
+   * following characters:
+   * <ul>
+   *   <li>Space: {@code 0x20}, but must not be at the beginning or at the end of the value.</li>
+   *   <li>ASCII visible characters ({@code 0x21-0x7E}), but excluding comma ({@code ",", 0x2C}).
+   * </ul>
+   *
+   * <p>Note this has to be the subset of valid characters in {@code field-content} from RFC 7230
+   * Section 3.2.
    */
   public interface AsciiMarshaller<T> {
     /**
-     * Serialize a metadata value to a ASCII string that contains only printable characters and
-     * space.
+     * Serialize a metadata value to a ASCII string that contains only the characters listed in the
+     * class comment of {@link AsciiMarshaller}. Otherwise the output may be considered invalid and
+     * discarded by the transport, or the call may fail.
      *
      * @param value to serialize
      * @return serialized version of value, or null if value cannot be transmitted.
@@ -436,22 +359,37 @@ public class Metadata {
 
   /**
    * Key for metadata entries. Allows for parsing and serialization of metadata.
+   *
+   * <h3>Valid characters in key names</h3>
+   *
+   * <p>Only the following ASCII characters are allowed in the names of keys:
+   * <ul>
+   *   <li>letters, i.e., {@code a-z} and {@code A-Z}</li>
+   *   <li>digits, i.e., {@code 0-9}</li>
+   *   <li>dash, i.e., {@code -}</li>
+   *   <li>underscore, i.e., {@code _}</li>
+   * </ul>
+   *
+   * <p>Note this has to be the subset of valid HTTP/2 token characters as defined in RFC7230
+   * Section 3.2.6</p>
    */
   public abstract static class Key<T> {
 
     /**
      * Creates a key for a binary header.
      *
-     * @param name must end with {@link #BINARY_HEADER_SUFFIX}
+     * @param name Must contain only the valid key characters as defined in the class comment. Must
+     *             end with {@link #BINARY_HEADER_SUFFIX}.
      */
     public static <T> Key<T> of(String name, BinaryMarshaller<T> marshaller) {
       return new BinaryKey<T>(name, marshaller);
     }
 
     /**
-     * Creates a key for a ASCII header.
+     * Creates a key for an ASCII header.
      *
-     * @param name must not end with {@link #BINARY_HEADER_SUFFIX}
+     * @param name Must contain only the valid key characters as defined in the class comment. Must
+     *             <b>not</b> end with {@link #BINARY_HEADER_SUFFIX}
      */
     public static <T> Key<T> of(String name, AsciiMarshaller<T> marshaller) {
       return new AsciiKey<T>(name, marshaller);

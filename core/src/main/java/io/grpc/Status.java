@@ -310,12 +310,14 @@ public final class Status {
   /**
    * Key to bind status code to trailing metadata.
    */
+  @Internal
   public static final Metadata.Key<Status> CODE_KEY
       = Metadata.Key.of("grpc-status", new StatusCodeMarshaller());
 
   /**
    * Key to bind status message to trailing metadata.
    */
+  @Internal
   public static final Metadata.Key<String> MESSAGE_KEY
       = Metadata.Key.of("grpc-message", Metadata.ASCII_STRING_MARSHALLER);
 
@@ -458,5 +460,25 @@ public final class Status {
     public Status parseAsciiString(String serialized) {
       return fromCodeValue(Integer.valueOf(serialized));
     }
+  }
+
+  /**
+   * Equality on Statuses is not well defined.  Instead, do comparison based on their Code with
+   * {@link #getCode}.  The description and cause of the Status are unlikely to be stable, and
+   * additional fields may be added to Status in the future.
+   */
+  @Override
+  public boolean equals(Object obj) {
+    return super.equals(obj);
+  }
+
+  /**
+   * Hash codes on Statuses are not well defined.
+   *
+   * @see #equals
+   */
+  @Override
+  public int hashCode() {
+    return super.hashCode();
   }
 }

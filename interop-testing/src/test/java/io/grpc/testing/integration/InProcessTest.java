@@ -31,7 +31,7 @@
 
 package io.grpc.testing.integration;
 
-import io.grpc.ChannelImpl;
+import io.grpc.ManagedChannel;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 
@@ -57,7 +57,7 @@ public class InProcessTest extends AbstractTransportTest {
   }
 
   @Override
-  protected ChannelImpl createChannel() {
+  protected ManagedChannel createChannel() {
     return InProcessChannelBuilder.forName(serverName).build();
   }
 }

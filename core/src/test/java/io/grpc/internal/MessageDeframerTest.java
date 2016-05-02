@@ -31,6 +31,7 @@
 
 package io.grpc.internal;
 
+import static io.grpc.internal.GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.anyInt;
@@ -44,6 +45,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import com.google.common.io.ByteStreams;
 import com.google.common.primitives.Bytes;
 
+import io.grpc.Codec;
 import io.grpc.internal.MessageDeframer.Listener;
 
 import org.junit.Test;
@@ -66,7 +68,8 @@ import java.util.zip.GZIPOutputStream;
 @RunWith(JUnit4.class)
 public class MessageDeframerTest {
   private Listener listener = mock(Listener.class);
-  private MessageDeframer deframer = new MessageDeframer(listener);
+  private MessageDeframer deframer = new MessageDeframer(listener, Codec.Identity.NONE,
+          DEFAULT_MAX_MESSAGE_SIZE);
   private ArgumentCaptor<InputStream> messages = ArgumentCaptor.forClass(InputStream.class);
 
   @Test
@@ -120,7 +123,7 @@ public class MessageDeframerTest {
     verify(listener).messageRead(messages.capture());
     assertEquals(Bytes.asList(new byte[] {3, 14, 1, 5, 9, 2, 6}), bytes(messages));
     verify(listener, atLeastOnce()).bytesRead(anyInt());
-    verify(listener).deliveryStalled();
+    assertTrue(deframer.isStalled());
     verifyNoMoreInteractions(listener);
   }
 
@@ -135,7 +138,7 @@ public class MessageDeframerTest {
     verify(listener).messageRead(messages.capture());
     assertEquals(Bytes.asList(new byte[] {3}), bytes(messages));
     verify(listener, atLeastOnce()).bytesRead(anyInt());
-    verify(listener).deliveryStalled();
+    assertTrue(deframer.isStalled());
     verifyNoMoreInteractions(listener);
   }
 
@@ -175,7 +178,7 @@ public class MessageDeframerTest {
 
   @Test
   public void compressed() {
-    deframer = new MessageDeframer(listener, MessageDeframer.Compression.GZIP);
+    deframer = new MessageDeframer(listener, new Codec.Gzip(), DEFAULT_MAX_MESSAGE_SIZE);
     deframer.request(1);
 
     byte[] payload = compress(new byte[1000]);

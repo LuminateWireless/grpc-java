@@ -35,7 +35,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
-import io.grpc.internal.ExperimentalApi;
 import io.grpc.internal.SharedResourceHolder;
 
 import java.io.Closeable;
@@ -111,7 +110,7 @@ import javax.annotation.Nullable;
  * responsibility of the application to ensure that all contexts are properly cancelled.</li>
  * </ul>
  */
-@ExperimentalApi
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/262")
 public class Context {
 
   private static final Logger LOG = Logger.getLogger(Context.class.getName());
