@@ -39,4 +39,9 @@ public interface ServerTransport {
    * be processed on a separate thread. May only be called once.
    */
   void shutdown();
+  
+  /**
+   * @return the ip and port of client.
+   */
+  String remoteAddress();
 }

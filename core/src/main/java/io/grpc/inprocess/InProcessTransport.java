@@ -526,6 +526,11 @@ class InProcessTransport implements ServerTransport, ManagedClientTransport {
       public void setDecompressor(Decompressor decompressor) {}
     }
   }
+  
+  @Override
+  public String remoteAddress() {
+    return "";
+  }
 
   /**
    * Returns a new status with the same code and description, but stripped of any other information

@@ -189,6 +189,11 @@ class NettyClientTransport implements ManagedClientTransport {
       handler.getWriteQueue().enqueue(new GracefulCloseCommand(status), true);
     }
   }
+  
+  @Override
+  public String remoteAddress() {
+    return address.toString();
+  }
 
   @Override
   public String toString() {

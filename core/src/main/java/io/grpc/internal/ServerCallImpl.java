@@ -40,6 +40,7 @@ import static io.grpc.internal.GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ENCODING_KEY;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.luminate.logs.GrpcLog;
 
 import io.grpc.Attributes;
 import io.grpc.Codec;
@@ -54,12 +55,16 @@ import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.ServerCall;
 import io.grpc.Status;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.List;
 import java.util.Set;
 
 final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
+  private static final Logger log = Logger.getLogger(ServerCallImpl.class.getName());
   private final ServerStream stream;
   private final MethodDescriptor<ReqT, RespT> method;
   private final Context.CancellableContext context;
@@ -72,16 +77,21 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
   private boolean sendHeadersCalled;
   private boolean closeCalled;
   private Compressor compressor;
+  
+  // For grpc logging
+  private final GrpcLog.ServerCallContext serverContext;
+  private int sendSequenceId = 0;
 
-  ServerCallImpl(ServerStream stream, MethodDescriptor<ReqT, RespT> method,
-      Metadata inboundHeaders, Context.CancellableContext context,
-      DecompressorRegistry decompressorRegistry, CompressorRegistry compressorRegistry) {
+  ServerCallImpl(ServerStream stream, MethodDescriptor<ReqT, RespT> method, Metadata inboundHeaders,
+      Context.CancellableContext context, DecompressorRegistry decompressorRegistry,
+      CompressorRegistry compressorRegistry, GrpcLog.ServerCallContext serverContext) {
     this.stream = stream;
     this.method = method;
     this.context = context;
     this.inboundHeaders = inboundHeaders;
     this.decompressorRegistry = decompressorRegistry;
     this.compressorRegistry = compressorRegistry;
+    this.serverContext = serverContext;
 
     if (inboundHeaders.containsKey(MESSAGE_ENCODING_KEY)) {
       String encoding = inboundHeaders.get(MESSAGE_ENCODING_KEY);
@@ -154,12 +164,27 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
     checkState(!closeCalled, "call is closed");
     try {
       InputStream resp = method.streamResponse(message);
+      if (serverContext != null) {
+        byte[] buffer = GrpcLog.getBytesFromInputStream(resp);
+        if (method.getType() == MethodDescriptor.MethodType.UNARY
+            || method.getType() == MethodDescriptor.MethodType.CLIENT_STREAMING) {
+          GrpcLog.serverLog(serverContext, serverContext.getRid(), buffer,
+              GrpcLog.MessageType.MESSAGETYPE_RESPONSE);
+        } else {
+          GrpcLog.serverLog(serverContext, serverContext.getRid() + "-" + sendSequenceId++, buffer,
+              GrpcLog.MessageType.MESSAGETYPE_RESPONSE);
+        }
+        resp = new ByteArrayInputStream(buffer);
+      }
       stream.writeMessage(resp);
       stream.flush();
     } catch (RuntimeException e) {
       close(Status.fromThrowable(e), new Metadata());
       throw e;
     } catch (Throwable t) {
+      if (t instanceof IOException) {
+        log.log(Level.SEVERE, "Function GrpcLog.getBytesFromInputStream fail");
+      }
       close(Status.fromThrowable(t), new Metadata());
       throw new RuntimeException(t);
     }
@@ -216,6 +241,7 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
     private final ServerCall.Listener<ReqT> listener;
     private final Context.CancellableContext context;
     private boolean messageReceived;
+    private int recvSequenceId = 0;
 
     public ServerStreamListenerImpl(
         ServerCallImpl<ReqT, ?> call, ServerCall.Listener<ReqT> listener,
@@ -231,6 +257,7 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
         if (call.cancelled) {
           return;
         }
+        
         // Special case for unary calls.
         if (messageReceived && call.method.getType() == MethodType.UNARY) {
           call.stream.close(Status.INVALID_ARGUMENT.withDescription(
@@ -239,8 +266,24 @@ final class ServerCallImpl<ReqT, RespT> extends ServerCall<RespT> {
           return;
         }
         messageReceived = true;
-
-        listener.onMessage(call.method.parseRequest(message));
+        
+        if (call.serverContext != null) {
+          byte[] buffer = GrpcLog.getBytesFromInputStream(message);
+          if (call.method.getType() == MethodDescriptor.MethodType.UNARY
+              || call.method.getType() == MethodDescriptor.MethodType.SERVER_STREAMING) {
+            GrpcLog.serverLog(call.serverContext, call.serverContext.getRid(), buffer,
+                GrpcLog.MessageType.MESSAGETYPE_REQUEST);
+          } else {
+            GrpcLog.serverLog(call.serverContext, call.serverContext.getRid() + "-" + recvSequenceId++, buffer,
+                GrpcLog.MessageType.MESSAGETYPE_REQUEST);
+          }
+          listener.onMessage(call.method.parseRequest(new ByteArrayInputStream(buffer)));
+        } else {
+          listener.onMessage(call.method.parseRequest(message));
+        }
+  
+      } catch (IOException e) {
+        log.log(Level.SEVERE, "Function GrpcLog.getBytesFromInputStream fail");
       } finally {
         try {
           message.close();

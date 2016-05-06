@@ -40,12 +40,15 @@ import static io.grpc.Status.DEADLINE_EXCEEDED;
 import static io.grpc.internal.GrpcUtil.ACCEPT_ENCODING_JOINER;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ACCEPT_ENCODING_KEY;
 import static io.grpc.internal.GrpcUtil.MESSAGE_ENCODING_KEY;
+import static io.grpc.internal.GrpcUtil.REQUEST_ID_KEY;
 import static io.grpc.internal.GrpcUtil.TIMEOUT_KEY;
 import static io.grpc.internal.GrpcUtil.USER_AGENT_KEY;
 import static java.lang.Math.max;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.luminate.logs.GrpcLog;
+import com.luminate.logs.Logging;
 
 import io.grpc.CallOptions;
 import io.grpc.ClientCall;
@@ -61,13 +64,16 @@ import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.MethodType;
 import io.grpc.Status;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.io.IOException;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.UUID;
 
 import javax.annotation.Nullable;
 
@@ -94,6 +100,8 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT>
   private ScheduledExecutorService deadlineCancellationExecutor;
   private DecompressorRegistry decompressorRegistry = DecompressorRegistry.getDefaultInstance();
   private CompressorRegistry compressorRegistry = CompressorRegistry.getDefaultInstance();
+  private GrpcLog.ClientCallContext clientContext;
+  private int sendSequenceId = 0;
 
   ClientCallImpl(MethodDescriptor<ReqT, RespT> method, Executor executor,
       CallOptions callOptions, ClientTransportProvider clientTransportProvider,
@@ -220,6 +228,12 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT>
       updateTimeoutHeaders(effectiveDeadline, callOptions.getDeadline(),
           parentContext.getDeadline(), headers);
       ClientTransport transport = clientTransportProvider.get(callOptions);
+      // Add the request id into Metadata.
+      headers.removeAll(REQUEST_ID_KEY);
+      String requestId = UUID.randomUUID().toString();
+      headers.put(REQUEST_ID_KEY, requestId);
+      clientContext = new GrpcLog.ClientCallContext(requestId, transport.remoteAddress(),
+          method.getFullMethodName());
       stream = transport.newStream(method, headers);
     } else {
       stream = new FailingClientStream(DEADLINE_EXCEEDED);
@@ -352,8 +366,18 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT>
     try {
       // TODO(notcarl): Find out if messageIs needs to be closed.
       InputStream messageIs = method.streamRequest(message);
-      stream.writeMessage(messageIs);
+      byte[] buffer = GrpcLog.getBytesFromInputStream(messageIs);  
+      if (method.getType() == MethodDescriptor.MethodType.UNARY
+          || method.getType() == MethodDescriptor.MethodType.SERVER_STREAMING) {
+        GrpcLog.clientLog(clientContext, clientContext.getRid(), buffer,
+            GrpcLog.MessageType.MESSAGETYPE_REQUEST);
+      } else {
+        GrpcLog.clientLog(clientContext, clientContext.getRid() + "-" + sendSequenceId++, buffer,
+            GrpcLog.MessageType.MESSAGETYPE_REQUEST);
+      }
+      stream.writeMessage(new ByteArrayInputStream(buffer));
     } catch (Throwable e) {
+      log.log(Level.SEVERE, "Function GrpcLog.getBytesFromInputStream fail");
       stream.cancel(Status.CANCELLED.withCause(e).withDescription("Failed to stream message"));
       return;
     }
@@ -379,6 +403,7 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT>
   private class ClientStreamListenerImpl implements ClientStreamListener {
     private final Listener<RespT> observer;
     private boolean closed;
+    private int recvSequenceId = 0;
 
     public ClientStreamListenerImpl(Listener<RespT> observer) {
       this.observer = Preconditions.checkNotNull(observer, "observer");
@@ -426,12 +451,27 @@ final class ClientCallImpl<ReqT, RespT> extends ClientCall<ReqT, RespT>
             }
 
             try {
-              observer.onMessage(method.parseResponse(message));
+              byte[] buffer = GrpcLog.getBytesFromInputStream(message);
+              if (method.getType() == MethodDescriptor.MethodType.UNARY
+                  || method.getType() == MethodDescriptor.MethodType.CLIENT_STREAMING) {
+                GrpcLog.clientLog(clientContext, clientContext.getRid(), buffer,
+                    GrpcLog.MessageType.MESSAGETYPE_RESPONSE);
+              } else {
+                GrpcLog.clientLog(clientContext, clientContext.getRid() + "-" + recvSequenceId++, buffer,
+                    GrpcLog.MessageType.MESSAGETYPE_RESPONSE);
+              }
+              observer.onMessage(method.parseResponse(new ByteArrayInputStream(buffer)));
+            } catch (IOException e) {
+              log.log(Level.SEVERE, "Function GrpcLog.getBytesFromInputStream fail");
             } finally {
               message.close();
             }
           } catch (Throwable t) {
             stream.cancel(Status.CANCELLED.withCause(t).withDescription("Failed to read message."));
+            // Binary log the error information. 
+            Status status = Status.fromThrowable(t);
+            GrpcLog.clientLog(clientContext, clientContext.getRid(), status.getCode().value(),
+                status.getDescription(), GrpcLog.MessageType.MESSAGETYPE_STATUS);
             return;
           }
         }

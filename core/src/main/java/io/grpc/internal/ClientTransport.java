@@ -96,4 +96,9 @@ public interface ClientTransport {
      */
     void onFailure(Throwable cause);
   }
+  
+  /**
+   *  Return the remote address (server address) of the transport.
+   */
+  String remoteAddress();
 }

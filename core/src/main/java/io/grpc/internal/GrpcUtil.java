@@ -92,6 +92,13 @@ public final class GrpcUtil {
           Metadata.Key.of("user-agent", Metadata.ASCII_STRING_MARSHALLER);
 
   /**
+   *  {@link io.grpc.Metadata.Key} for the request id.
+   */
+  public static final Metadata.Key<String> REQUEST_ID_KEY = 
+      Metadata.Key.of(GrpcUtil.REQUEST_ID, Metadata.ASCII_STRING_MARSHALLER);
+  /**
+  
+  /**
    * The default port for plain-text connections.
    */
   public static final int DEFAULT_PORT_PLAINTEXT = 80;
@@ -136,6 +143,11 @@ public final class GrpcUtil {
    */
   public static final int DEFAULT_MAX_MESSAGE_SIZE = 100 * 1024 * 1024;
 
+  /**
+   *  The request id carrying the uuid of request. 
+   * */
+  public static final String REQUEST_ID = "rid";
+  
   /**
    * The default maximum size (in bytes) for inbound header/trailer.
    */

@@ -297,4 +297,9 @@ class DelayedClientTransport implements ManagedClientTransport {
       }
     }
   }
+  
+  @Override
+  public String remoteAddress() {
+    return "";
+  }
 }

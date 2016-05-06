@@ -66,4 +66,9 @@ class FailingClientTransport implements ClientTransport {
         }
       });
   }
+  
+  @Override
+  public String remoteAddress() {
+    return "";
+  }
 }

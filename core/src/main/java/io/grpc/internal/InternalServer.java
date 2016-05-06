@@ -63,4 +63,9 @@ public interface InternalServer {
    * available or does not make sense.
    */
   int getPort();
+  
+  /**
+   * @return the ip and port of server address. 
+   */
+  String localAddress();
 }

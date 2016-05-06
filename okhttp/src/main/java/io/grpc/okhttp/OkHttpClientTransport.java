@@ -846,4 +846,9 @@ class OkHttpClientTransport implements ManagedClientTransport {
       // TODO(madongfly): Deal with alternateService propagation
     }
   }
+  
+  @Override
+  public String remoteAddress() {
+    return address.toString();
+  }
 }

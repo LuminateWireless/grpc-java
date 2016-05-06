@@ -201,4 +201,9 @@ class NettyServer implements InternalServer {
       return this;
     }
   }
+  
+  @Override
+  public String localAddress() {
+    return this.address.toString();
+  }
 }

@@ -118,4 +118,9 @@ class NettyServerTransport implements ServerTransport {
     return NettyServerHandler.newHandler(transportListener, maxStreams, flowControlWindow,
         maxHeaderListSize, maxMessageSize);
   }
+  
+  @Override 
+  public String remoteAddress() {
+    return channel.remoteAddress().toString();
+  }
 }

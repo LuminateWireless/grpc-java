@@ -32,6 +32,7 @@
 package io.grpc.internal;
 
 import static com.google.common.base.Preconditions.checkState;
+import static io.grpc.internal.GrpcUtil.REQUEST_ID_KEY;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.grpc.Contexts.statusFromCancelled;
 import static io.grpc.Status.DEADLINE_EXCEEDED;
@@ -40,6 +41,7 @@ import static io.grpc.internal.GrpcUtil.TIMER_SERVICE;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 import com.google.common.base.Preconditions;
+import com.luminate.logs.GrpcLog;
 
 import io.grpc.CompressorRegistry;
 import io.grpc.Context;
@@ -59,6 +61,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 /**
  * Default implementation of {@link io.grpc.Server}, for creation by transports.
@@ -75,6 +78,7 @@ import java.util.concurrent.TimeUnit;
  * server stops servicing new requests and waits for all connections to terminate.
  */
 public final class ServerImpl extends io.grpc.Server {
+  private static final Logger log = Logger.getLogger(ServerImpl.class.getName());
   private static final ServerStreamListener NOOP_LISTENER = new NoopListener();
 
   /** Executor for application processing. */
@@ -96,6 +100,9 @@ public final class ServerImpl extends io.grpc.Server {
 
   private final DecompressorRegistry decompressorRegistry;
   private final CompressorRegistry compressorRegistry;
+  
+  private GrpcLog.ServerCallContext serverContext = null; 
+  private final String serverAddress;
 
   /**
    * Construct a server.
@@ -114,6 +121,7 @@ public final class ServerImpl extends io.grpc.Server {
     this.rootContext = Preconditions.checkNotNull(rootContext).fork();
     this.decompressorRegistry = decompressorRegistry;
     this.compressorRegistry = compressorRegistry;
+    this.serverAddress = transportServer.localAddress();
   }
 
   /**
@@ -322,10 +330,22 @@ public final class ServerImpl extends io.grpc.Server {
               listener = startCall(stream, methodName, method, headers, context);
             } catch (RuntimeException e) {
               stream.close(Status.fromThrowable(e), new Metadata());
+              // If server processing fail, log the error information.
+              if (serverContext != null) {
+                Status status = Status.fromThrowable(e);
+                GrpcLog.serverLog(serverContext, serverContext.getRid(), status.getCode().value(),
+                    status.getDescription(), GrpcLog.MessageType.MESSAGETYPE_STATUS);
+              }
               context.cancel(null);
               throw e;
             } catch (Throwable t) {
               stream.close(Status.fromThrowable(t), new Metadata());
+              // If server processing fail, log the error information.
+              if (serverContext != null) {
+                Status status = Status.fromThrowable(t);
+                GrpcLog.serverLog(serverContext, serverContext.getRid(), status.getCode().value(),
+                    status.getDescription(), GrpcLog.MessageType.MESSAGETYPE_STATUS);
+              }
               context.cancel(null);
               throw new RuntimeException(t);
             } finally {
@@ -365,9 +385,15 @@ public final class ServerImpl extends io.grpc.Server {
         ServerMethodDefinition<ReqT, RespT> methodDef, Metadata headers,
         Context.CancellableContext context) {
       // TODO(ejona86): should we update fullMethodName to have the canonical path of the method?
+      
+      if (headers.get(GrpcUtil.REQUEST_ID_KEY) != null) {
+        serverContext = new GrpcLog.ServerCallContext(headers.get(GrpcUtil.REQUEST_ID_KEY), serverAddress,
+            transport.remoteAddress(), fullMethodName);
+      }
+      
       ServerCallImpl<ReqT, RespT> call = new ServerCallImpl<ReqT, RespT>(
           stream, methodDef.getMethodDescriptor(), headers, context, decompressorRegistry,
-          compressorRegistry);
+          compressorRegistry, serverContext);
       ServerCall.Listener<ReqT> listener = methodDef.getServerCallHandler()
           .startCall(methodDef.getMethodDescriptor(), call, headers);
       if (listener == null) {

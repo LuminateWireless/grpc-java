@@ -80,7 +80,8 @@ java_library(
 java_library(
   name = 'okhttp',
   srcs = glob([
-    'okhttp/src/main/java/**/*.java'
+    'okhttp/src/main/java/**/*.java',
+    'okhttp/third_party/okhttp/java/**/*.java',
   ]),
   resources = glob([
     'okhttp/src/main/resources/**/*'
@@ -144,6 +145,7 @@ java_library(
   testonly = 1,
   deps = [
     ':grpc-java',
+    ':okhttp',
     ':testing',
     ':netty',
     '//third_party/java/google-auth-library:oauth2_http',
