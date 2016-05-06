@@ -1,0 +1,4 @@
+The Java gRPC implementation. HTTP/2 based RPC
+https://github.com/google/grpc-java
+
+Last import: master branch commit id: bc661e7fbba7ffcb204816269f71dd320ac15482

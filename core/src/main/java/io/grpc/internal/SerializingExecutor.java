@@ -33,6 +33,9 @@ package io.grpc.internal;
 
 import com.google.common.base.Preconditions;
 
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.concurrent.Executor;
@@ -152,10 +155,17 @@ public final class SerializingExecutor implements Executor {
           // Always run while not holding the lock, to avoid deadlocks.
           try {
             nextToRun.run();
-          } catch (RuntimeException e) {
-            // Log it and keep going.
-            log.log(Level.SEVERE, "Exception while executing runnable "
-                + nextToRun, e);
+          } catch (StatusRuntimeException e) {
+            if (e.getStatus() == Status.CANCELLED) {
+              // StatusRuntimeException is triggered when sending a
+              // result to a StreamObserver that has been cancelled by
+              // the client.  See stub/src/main/java/io/grpc/stub/{Client,Server}Calls.java
+              // Log it and keep going.
+              log.log(Level.SEVERE, "Exception while executing runnable "
+                      + nextToRun, e);
+            } else {
+              throw e;
+            }
           }
         }
       } finally {

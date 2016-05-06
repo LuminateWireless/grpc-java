@@ -352,11 +352,15 @@ public final class GrpcUtil {
    * Combine a host and port into an authority string.
    */
   public static String authorityFromHostAndPort(String host, int port) {
+    // Temporary work-around for URI forbidding "_" in DNS names
+    return host + ":" + port;
+    /*
     try {
       return new URI(null, null, host, port, null, null, null).getAuthority();
     } catch (URISyntaxException ex) {
       throw new IllegalArgumentException("Invalid host or port: " + host + " " + port, ex);
     }
+    */
   }
 
   /**
